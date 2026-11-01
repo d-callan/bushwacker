@@ -13,8 +13,9 @@ import matplotlib.pyplot as plt
 
 
 def main() -> None:
-    root = Path("/Users/sergei/Projects/trees")
-    with open(root / "benchmark_results.json", "r", encoding="utf-8") as f:
+    bench_dir = Path(__file__).resolve().parent
+    paper_dir = bench_dir.parent / "paper"
+    with open(bench_dir / "benchmark_results.json", "r", encoding="utf-8") as f:
         data = json.load(f)
 
     plt.rcParams.update({
@@ -131,7 +132,7 @@ def main() -> None:
         h = b.get_height()
         ax.text(b.get_x() + b.get_width() / 2, h + 2.5, f"{h:.1f}%", ha="center", va="bottom", fontsize=9.0, fontweight="bold", color="#045a8d")
 
-    fig.savefig(root / "fig1_synthetic_benchmarks.pdf", bbox_inches="tight")
+    fig.savefig(paper_dir / "fig1_synthetic_benchmarks.pdf", bbox_inches="tight")
     plt.close(fig)
 
     # ------------------------------------------------------------------
@@ -197,13 +198,13 @@ def main() -> None:
         ax.text(i, r_p / 2, f"{r_p:.1f}%", ha="center", va="center", fontsize=8.0, fontweight="bold", color="white" if r_p > 18 else "#2166ac")
         ax.text(i, 102.0, f"{n_i} INT / {n_s} SP\nshunts", ha="center", va="bottom", fontsize=7.5, fontweight="bold", color="#333333")
 
-    fig.savefig(root / "fig2_empirical_compression.pdf", bbox_inches="tight")
+    fig.savefig(paper_dir / "fig2_empirical_compression.pdf", bbox_inches="tight")
     plt.close(fig)
 
     # ------------------------------------------------------------------
     # Figure 3: Five-Axis Ruthless Stress-Test Suite vs. Classical Paradigms
     # ------------------------------------------------------------------
-    stress_path = root / "stress_test_results.json"
+    stress_path = bench_dir / "stress_test_results.json"
     if stress_path.exists():
         with open(stress_path, "r", encoding="utf-8") as f:
             sdata = json.load(f)
@@ -326,7 +327,7 @@ def main() -> None:
         for idx_5, (t_v, f_v, r_v) in enumerate(zip(tp5, fp5, rf5)):
             ax.text(idx_5, max(t_v, f_v) + 2.0, f"RF={r_v}", ha="center", va="bottom", fontsize=7.4, fontweight="bold", color="#222222")
 
-        fig.savefig(root / "fig3_stress_tests.pdf", bbox_inches="tight")
+        fig.savefig(paper_dir / "fig3_stress_tests.pdf", bbox_inches="tight")
         plt.close(fig)
 
     print("Generated fig1_synthetic_benchmarks.pdf, fig2_empirical_compression.pdf, and fig3_stress_tests.pdf")

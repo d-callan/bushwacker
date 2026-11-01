@@ -33,12 +33,16 @@ import json
 import math
 import os
 import subprocess
+import sys
 import tempfile
 import time
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
 import numpy as np
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "python"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from mdl_phylo import (
     MDLPhyloEngine,
