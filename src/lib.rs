@@ -217,22 +217,31 @@ impl PackedSeq64 {
         Self { words, len }
     }
 
-    /// Merge two packed sequences (`if u.valid { u } else { v }`) in O(L / 64) bitwise ops.
+    /// Reconstruct the ancestral packed sequence at internal node `w = parent(u, v)`
+    /// using the 64-site parallel bitwise Steiner Median `(u & v) | (u & r) | (v & r)`
+    /// against the nearest outgroup witness `r`. This strips terminal mutations on both
+    /// `(w, u)` and `(w, v)` while preserving a clean single-bit state at every site.
     #[inline]
-    pub fn merge_consensus(u: &Self, v: &Self) -> Self {
+    pub fn merge_steiner_median(u: &Self, v: &Self, r: &Self) -> Self {
         let mut words = Vec::with_capacity(u.words.len());
-        for (wu, wv) in u.words.iter().zip(&v.words) {
-            let fb = !wu.valid;
-            let b0 = wu.b0 | (fb & wv.b0);
-            let b1 = wu.b1 | (fb & wv.b1);
-            let b2 = wu.b2 | (fb & wv.b2);
-            let b3 = wu.b3 | (fb & wv.b3);
+        for ((wu, wv), wr) in u.words.iter().zip(&v.words).zip(&r.words) {
+            let mb0 = (wu.b0 & wv.b0) | (wu.b0 & wr.b0) | (wv.b0 & wr.b0);
+            let mb1 = (wu.b1 & wv.b1) | (wu.b1 & wr.b1) | (wv.b1 & wr.b1);
+            let mb2 = (wu.b2 & wv.b2) | (wu.b2 & wr.b2) | (wv.b2 & wr.b2);
+            let mb3 = (wu.b3 & wv.b3) | (wu.b3 & wr.b3) | (wv.b3 & wr.b3);
+            let has_med = mb0 | mb1 | mb2 | mb3;
+            let fb_u = !has_med & wu.valid;
+            let fb_v = !has_med & !wu.valid & wv.valid;
+            let b0 = mb0 | (fb_u & wu.b0) | (fb_v & wv.b0);
+            let b1 = mb1 | (fb_u & wu.b1) | (fb_v & wv.b1);
+            let b2 = mb2 | (fb_u & wu.b2) | (fb_v & wv.b2);
+            let b3 = mb3 | (fb_u & wu.b3) | (fb_v & wv.b3);
             words.push(BitPlaneWord64 {
                 b0,
                 b1,
                 b2,
                 b3,
-                valid: wu.valid | wv.valid,
+                valid: b0 | b1 | b2 | b3,
             });
         }
         Self { words, len: u.len }
@@ -1011,16 +1020,44 @@ impl BushwhackerEngine {
         let l_eff = ((total_valid as f64) / (n as f64)).clamp(1.0, l as f64);
 
         let (ti_cost, tv_cost) = self.estimate_subst_surprise(&mat, n, l);
-        let (mut dist_weights, mut tree_weights, is_coding) = if self.coding_aware {
+        let (raw_dist_w, raw_tree_w, is_coding) = if self.coding_aware {
             detect_coding_frame_and_weights(&mat, n, l)
         } else {
             (vec![1.0; l], vec![1.0; l], false)
         };
 
-        let (dw_mod, tw_mod) =
-            self.compute_dual_site_coherence_weights(&mat, n, l, &dist_weights, &tree_weights);
-        dist_weights = dw_mod;
-        tree_weights = tw_mod;
+        // Pure unsupervised Four-Gamete compatibility weights (Hypothesis H0)
+        let (dw_h0, tw_h0) =
+            self.compute_dual_site_coherence_weights(&mat, n, l, &vec![1.0; l], &vec![1.0; l]);
+
+        // If coding_aware detected an open reading frame, use Rissanen Two-Part MDL model
+        // selection (charging ln(2) nats for the 1-bit model choice) to select between H0
+        // (pure Four-Gamete compatibility) and H1 (synonymous-boost / nonsynonymous-damped prior).
+        let (dist_weights, tree_weights) = if self.coding_aware && is_coding && n >= 5 {
+            let (dw_h1, tw_h1) =
+                self.compute_dual_site_coherence_weights(&mat, n, l, &raw_dist_w, &raw_tree_w);
+            if self.select_coding_weights_by_mdl(
+                names,
+                &mat,
+                &bitmasks,
+                &majority_state,
+                &dw_h0,
+                &tw_h0,
+                &dw_h1,
+                &tw_h1,
+                n,
+                l,
+                l_eff,
+                ti_cost,
+                tv_cost,
+            ) {
+                (dw_h1, tw_h1)
+            } else {
+                (dw_h0, tw_h0)
+            }
+        } else {
+            (dw_h0, tw_h0)
+        };
 
         // Step 1 & 2: Sub-quadratic O(N log N * L) 3-point terminal loads & candidate backbone
         let (terminal_loads, mut adj, node_labels) = self.build_subquadratic_loads_and_backbone(
@@ -1392,7 +1429,6 @@ impl BushwhackerEngine {
 
         let var_count = n_states.iter().filter(|&&st| st >= 2).count();
         let multi_count = n_states.iter().filter(|&&st| st >= 3).count();
-        let frac_var = (var_count as f64) / (l as f64);
         let frac_multi = if var_count > 0 {
             (multi_count as f64) / (var_count as f64)
         } else {
@@ -1401,14 +1437,13 @@ impl BushwhackerEngine {
 
         let mut mod_dist = vec![0.0_f64; l];
         let mut mod_tree = vec![0.0_f64; l];
-        let deep_coding = frac_var >= 0.25 && frac_multi > 0.40;
-        let unsaturated_coding = frac_var >= 0.25 && frac_multi < 0.38;
 
         for s in 0..l {
             let w_mt = if frac_multi > 0.50 { 1.0 } else { w_mult[s] };
             let coh_tree_factor = (site_coh[s] * w_mt).clamp(0.75, 1.25);
-            let (eff_d, eff_t) = if unsaturated_coding || (deep_coding && coh_tree_factor >= 0.90)
-            {
+            // Only damp nonsynonymous sites that exhibit Four-Gamete incompatibility (coh_tree_factor < 0.90);
+            // preserve Four-Gamete compatible synapomorphies at (1.0, 1.0).
+            let (eff_d, eff_t) = if coh_tree_factor >= 0.90 {
                 (1.0, 1.0)
             } else {
                 (dist_weights[s], tree_weights[s])
@@ -1417,6 +1452,76 @@ impl BushwhackerEngine {
             mod_tree[s] = eff_t * coh_tree_factor;
         }
         (mod_dist, mod_tree)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn select_coding_weights_by_mdl(
+        &self,
+        names: &[String],
+        mat: &[i8],
+        bitmasks: &[u8],
+        majority_state: &[i8],
+        dw_h0: &[f64],
+        tw_h0: &[f64],
+        dw_h1: &[f64],
+        tw_h1: &[f64],
+        n: usize,
+        l: usize,
+        l_eff: f64,
+        ti_cost: f64,
+        tv_cost: f64,
+    ) -> bool {
+        // Evaluate exact Two-Part MDL description length L(T, X) on up to K = 128 stratified taxa
+        let k_sub = n.min(128);
+        let sub_idx: Vec<usize> = if n <= 128 {
+            (0..n).collect()
+        } else {
+            (0..k_sub)
+                .map(|i| (i * (n - 1)) / (k_sub - 1))
+                .collect()
+        };
+        let sub_names: Vec<String> = sub_idx.iter().map(|&i| names[i].clone()).collect();
+        let mut sub_mat = Vec::with_capacity(k_sub * l);
+        let mut sub_masks = Vec::with_capacity(k_sub * l);
+        for &i in &sub_idx {
+            sub_mat.extend_from_slice(&mat[i * l..(i + 1) * l]);
+            sub_masks.extend_from_slice(&bitmasks[i * l..(i + 1) * l]);
+        }
+
+        let eval_hypothesis = |dw: &[f64], tw: &[f64]| -> f64 {
+            let (loads, adj_0, mut labels_0) = self.build_subquadratic_loads_and_backbone(
+                &sub_names,
+                &sub_mat,
+                &sub_masks,
+                dw,
+                tw,
+                k_sub,
+                l,
+                l_eff,
+                ti_cost,
+                tv_cost,
+            );
+            let (adj_c, branches_c, _, _) = self.contract_unsupported_edges_mdl(
+                adj_0,
+                &sub_masks,
+                majority_state,
+                &loads,
+                k_sub,
+                l,
+                l_eff,
+                ti_cost,
+                tv_cost,
+                tw,
+                &mut labels_0,
+                true,
+            );
+            self.compute_tree_total_mdl_nats(&adj_c, &branches_c, l_eff)
+        };
+
+        let mdl_h0 = eval_hypothesis(dw_h0, tw_h0);
+        let mdl_h1 = eval_hypothesis(dw_h1, tw_h1);
+        // Require H1 to compress the alignment by at least ln(2) nats (1-bit model choice)
+        mdl_h1 + 2.0_f64.ln() < mdl_h0
     }
 
     #[inline]
@@ -1495,6 +1600,13 @@ impl BushwhackerEngine {
         -0.75 * (1.0 - (4.0 / 3.0) * p_hat).ln() * l_eff
     }
 
+    /// Partition `items` into metric clades/slices of size `<= max_cluster_size` using
+    /// Farthest-Point Voronoi Landmark Clustering ordered along a greedy nearest-neighbor chain.
+    ///
+    /// Unlike 1D two-pivot projection `d(x, p1) - d(x, p2)` (where root-to-tip distances cancel
+    /// out to a constant across all clades orthogonal to `(p1, p2)`), Voronoi assignment
+    /// `argmin_k d(x, L_k)` groups every taxon with the landmark inside its own clade or
+    /// local trunk neighborhood in O(M * K * L / 64) time.
     fn partition_items_recursive(
         items: Vec<usize>,
         seqs: &HashMap<usize, PackedSeq64>,
@@ -1504,95 +1616,241 @@ impl BushwhackerEngine {
         max_cluster_size: usize,
         out_clusters: &mut Vec<Vec<usize>>,
     ) {
-        if items.len() <= max_cluster_size {
-            out_clusters.push(items);
+        let m = items.len();
+        if m <= max_cluster_size {
+            if !items.is_empty() {
+                out_clusters.push(items);
+            }
             return;
         }
+
+        let k_land = (m / (max_cluster_size / 2).max(16)).clamp(3, 32);
         let p0 = items[0];
         let seq_p0 = &seqs[&p0];
-        let mut p1 = p0;
-        let mut max_d1 = -1.0_f64;
+        let mut l1 = p0;
+        let mut max_d0 = -1.0_f64;
         for &x in &items {
-            if x != p0 {
-                let d = Self::compute_pair_jc_dist_packed(
-                    seq_p0,
-                    &seqs[&x],
-                    site_weights,
-                    word_weight_sums,
-                    l_eff,
-                );
-                if d > max_d1 {
-                    max_d1 = d;
-                    p1 = x;
+            let d = Self::compute_pair_jc_dist_packed(
+                seq_p0,
+                &seqs[&x],
+                site_weights,
+                word_weight_sums,
+                l_eff,
+            );
+            if d > max_d0 {
+                max_d0 = d;
+                l1 = x;
+            }
+        }
+
+        let mut landmarks: Vec<usize> = Vec::with_capacity(k_land);
+        landmarks.push(l1);
+        let mut min_dist = vec![f64::INFINITY; m];
+        let mut sum_dist = vec![0.0_f64; m];
+        let mut best_k = vec![0usize; m];
+
+        for k_idx in 0..k_land {
+            let lk = landmarks[k_idx];
+            let seq_lk = &seqs[&lk];
+            for (i, &x) in items.iter().enumerate() {
+                let d = if x == lk {
+                    0.0
+                } else {
+                    Self::compute_pair_jc_dist_packed(
+                        seq_lk,
+                        &seqs[&x],
+                        site_weights,
+                        word_weight_sums,
+                        l_eff,
+                    )
+                };
+                sum_dist[i] += d;
+                if d < min_dist[i] {
+                    min_dist[i] = d;
+                    best_k[i] = k_idx;
+                }
+            }
+            if k_idx + 1 < k_land {
+                // Select the 80th-percentile unrepresented sequence rather than the 100th-percentile
+                // solitary outlier tip so landmarks land inside genuine clades.
+                let mut cand_dists: Vec<(f64, usize)> = items
+                    .iter()
+                    .copied()
+                    .enumerate()
+                    .filter(|(_, x)| !landmarks.contains(x))
+                    .map(|(i, x)| (min_dist[i], x))
+                    .collect();
+                if !cand_dists.is_empty() {
+                    cand_dists.sort_by(|a, b| {
+                        a.0.partial_cmp(&b.0)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                            .then_with(|| a.1.cmp(&b.1))
+                    });
+                    let q_idx = ((cand_dists.len() * 4) / 5).min(cand_dists.len() - 1);
+                    landmarks.push(cand_dists[q_idx].1);
                 }
             }
         }
-        let seq_p1 = &seqs[&p1];
-        let mut p2 = p0;
-        let mut max_d2 = -1.0_f64;
-        for &x in &items {
-            if x != p1 {
-                let d = Self::compute_pair_jc_dist_packed(
-                    seq_p1,
-                    &seqs[&x],
-                    site_weights,
-                    word_weight_sums,
-                    l_eff,
-                );
-                if d > max_d2 {
-                    max_d2 = d;
-                    p2 = x;
-                }
-            }
-        }
-        let seq_p2 = &seqs[&p2];
-        let mut projections: Vec<(f64, usize)> = items
+
+        let mean_l_dist: Vec<f64> = sum_dist
             .into_iter()
-            .map(|x| {
-                let sx = &seqs[&x];
-                let d1 = Self::compute_pair_jc_dist_packed(
-                    sx,
-                    seq_p1,
-                    site_weights,
-                    word_weight_sums,
-                    l_eff,
-                );
-                let d2 = Self::compute_pair_jc_dist_packed(
-                    sx,
-                    seq_p2,
-                    site_weights,
-                    word_weight_sums,
-                    l_eff,
-                );
-                (d1 - d2, x)
-            })
+            .map(|s| s / (k_land as f64))
             .collect();
-        projections.sort_by(|a, b| {
+        let mut cells: Vec<Vec<(f64, Vec<usize>)>> = vec![Vec::new(); k_land];
+
+        // Lock sister cherries/clades into indivisible micro-clusters (size <= 8)
+        // using the Landmark-Centered NJ Q-criterion q(i, j) = d(i, j) - r_i - r_j
+        // so terminal branch lengths cancel out and Voronoi boundaries never sever sister taxa!
+        let mut nn_edges: Vec<(f64, usize, usize)> = Vec::with_capacity(m);
+        if m <= 2048 {
+            for i in 0..m {
+                let si = &seqs[&items[i]];
+                let ri = mean_l_dist[i];
+                let mut best_q = f64::INFINITY;
+                let mut best_j = i;
+                for j in 0..m {
+                    if i != j {
+                        let d = Self::compute_pair_jc_dist_packed(
+                            si,
+                            &seqs[&items[j]],
+                            site_weights,
+                            word_weight_sums,
+                            l_eff,
+                        );
+                        let q = d - ri - mean_l_dist[j];
+                        if q < best_q {
+                            best_q = q;
+                            best_j = j;
+                        }
+                    }
+                }
+                if best_j != i {
+                    nn_edges.push((best_q, i, best_j));
+                }
+            }
+        } else {
+            // For M > 2048, find minimum-Q sister within each landmark bucket in O(M * (M/K))
+            let mut raw_buckets: Vec<Vec<usize>> = vec![Vec::new(); k_land];
+            for i in 0..m {
+                raw_buckets[best_k[i]].push(i);
+            }
+            for bucket in &raw_buckets {
+                for &i in bucket {
+                    let si = &seqs[&items[i]];
+                    let ri = mean_l_dist[i];
+                    let mut best_q = f64::INFINITY;
+                    let mut best_j = i;
+                    for &j in bucket {
+                        if i != j {
+                            let d = Self::compute_pair_jc_dist_packed(
+                                si,
+                                &seqs[&items[j]],
+                                site_weights,
+                                word_weight_sums,
+                                l_eff,
+                            );
+                            let q = d - ri - mean_l_dist[j];
+                            if q < best_q {
+                                best_q = q;
+                                best_j = j;
+                            }
+                        }
+                    }
+                    if best_j != i {
+                        nn_edges.push((best_q, i, best_j));
+                    }
+                }
+            }
+        }
+        nn_edges.sort_by(|a, b| {
             a.0.partial_cmp(&b.0)
                 .unwrap_or(std::cmp::Ordering::Equal)
                 .then_with(|| a.1.cmp(&b.1))
         });
-        let mid = projections.len() / 2;
-        let left: Vec<usize> = projections[..mid].iter().map(|x| x.1).collect();
-        let right: Vec<usize> = projections[mid..].iter().map(|x| x.1).collect();
-        Self::partition_items_recursive(
-            left,
-            seqs,
-            site_weights,
-            word_weight_sums,
-            l_eff,
-            max_cluster_size,
-            out_clusters,
-        );
-        Self::partition_items_recursive(
-            right,
-            seqs,
-            site_weights,
-            word_weight_sums,
-            l_eff,
-            max_cluster_size,
-            out_clusters,
-        );
+
+        let mut uf_parent: Vec<usize> = (0..m).collect();
+        let mut uf_members: Vec<Vec<usize>> = (0..m).map(|i| vec![i]).collect();
+        for (_, u, v) in nn_edges {
+            let mut ru = u;
+            while uf_parent[ru] != ru {
+                ru = uf_parent[ru];
+            }
+            let mut rv = v;
+            while uf_parent[rv] != rv {
+                rv = uf_parent[rv];
+            }
+            if ru != rv && uf_members[ru].len() + uf_members[rv].len() <= 8 {
+                let moved = std::mem::take(&mut uf_members[rv]);
+                uf_members[ru].extend(moved);
+                uf_parent[rv] = ru;
+            }
+        }
+
+        for r in 0..m {
+            if uf_parent[r] == r && !uf_members[r].is_empty() {
+                let mut best_cell = best_k[r];
+                let mut best_cell_d = min_dist[r];
+                for &mem_i in &uf_members[r] {
+                    if min_dist[mem_i] < best_cell_d {
+                        best_cell_d = min_dist[mem_i];
+                        best_cell = best_k[mem_i];
+                    }
+                }
+                let global_group: Vec<usize> =
+                    uf_members[r].iter().map(|&idx| items[idx]).collect();
+                cells[best_cell].push((best_cell_d, global_group));
+            }
+        }
+        for cell in &mut cells {
+            cell.sort_by(|a, b| {
+                a.0.partial_cmp(&b.0)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| a.1[0].cmp(&b.1[0]))
+            });
+        }
+
+        // Order landmarks along a greedy nearest-neighbor chain starting from landmark 0
+        let mut visited_l = vec![false; k_land];
+        let mut chain_order = Vec::with_capacity(k_land);
+        let mut cur_l = 0usize;
+        visited_l[0] = true;
+        chain_order.push(0);
+        for _ in 1..k_land {
+            let seq_cur = &seqs[&landmarks[cur_l]];
+            let mut best_next = 0usize;
+            let mut best_d = f64::INFINITY;
+            for cand in 0..k_land {
+                if !visited_l[cand] {
+                    let d = Self::compute_pair_jc_dist_packed(
+                        seq_cur,
+                        &seqs[&landmarks[cand]],
+                        site_weights,
+                        word_weight_sums,
+                        l_eff,
+                    );
+                    if d < best_d {
+                        best_d = d;
+                        best_next = cand;
+                    }
+                }
+            }
+            visited_l[best_next] = true;
+            chain_order.push(best_next);
+            cur_l = best_next;
+        }
+
+        let mut current_pack: Vec<usize> = Vec::new();
+        for &c_idx in &chain_order {
+            for (_, group) in &cells[c_idx] {
+                if current_pack.len() + group.len() > max_cluster_size && !current_pack.is_empty() {
+                    out_clusters.push(std::mem::take(&mut current_pack));
+                }
+                current_pack.extend(group.iter().copied());
+            }
+        }
+        if !current_pack.is_empty() {
+            out_clusters.push(current_pack);
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1623,7 +1881,7 @@ impl BushwhackerEngine {
                 adj.entry(u).or_default().push(w);
                 adj.entry(v).or_default().push(w);
                 node_labels.insert(w, format!("N{w}"));
-                let sw = PackedSeq64::merge_consensus(&seqs[&u], &seqs[&v]);
+                let sw = PackedSeq64::merge_steiner_median(&seqs[&u], &seqs[&v], &seqs[&u]);
                 seqs.insert(w, sw);
                 return w;
             } else {
@@ -1703,18 +1961,28 @@ impl BushwhackerEngine {
             adj.entry(gv).or_default().push(gw);
             node_labels.insert(gw, format!("N{gw}"));
 
-            if stop_at_one {
-                let sw = PackedSeq64::merge_consensus(&seqs[&gu], &seqs[&gv]);
-                seqs.insert(gw, sw);
-            }
-
-            let d_uv = d_mat[lu * cap + lv];
-            let v_uv = v_mat[lu * cap + lv].max(1e-6);
             let others: Vec<usize> = active
                 .iter()
                 .copied()
                 .filter(|&x| x != lu && x != lv)
                 .collect();
+            if stop_at_one {
+                let gr = others
+                    .iter()
+                    .copied()
+                    .min_by(|&a, &b| {
+                        (d_mat[lu * cap + a] + d_mat[lv * cap + a])
+                            .partial_cmp(&(d_mat[lu * cap + b] + d_mat[lv * cap + b]))
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    })
+                    .map(|lx| local_to_global[lx])
+                    .unwrap_or(gu);
+                let sw = PackedSeq64::merge_steiner_median(&seqs[&gu], &seqs[&gv], &seqs[&gr]);
+                seqs.insert(gw, sw);
+            }
+
+            let d_uv = d_mat[lu * cap + lv];
+            let v_uv = v_mat[lu * cap + lv].max(1e-6);
             let lam = if !others.is_empty() {
                 let lam_num: f64 = others
                     .iter()
@@ -1759,7 +2027,7 @@ impl BushwhackerEngine {
             adj.entry(gu).or_default().push(gw);
             adj.entry(gv).or_default().push(gw);
             node_labels.insert(gw, format!("N{gw}"));
-            let sw = PackedSeq64::merge_consensus(&seqs[&gu], &seqs[&gv]);
+            let sw = PackedSeq64::merge_steiner_median(&seqs[&gu], &seqs[&gv], &seqs[&gu]);
             seqs.insert(gw, sw);
             gw
         } else {
@@ -1773,6 +2041,189 @@ impl BushwhackerEngine {
             }
             gw
         }
+    }
+
+    /// Sub-quadratic O(N log N * L / 64) Outgroup-Witnessed Partial Agglomeration.
+    ///
+    /// Runs local Neighbor-Joining on `cluster_nodes` in the presence of `witness_nodes`
+    /// (external outgroups from adjacent clusters and global anchors). The witness nodes
+    /// participate in all Q-criterion row sums so paraphyletic trunk slices retain exact
+    /// global orientation. Whenever a cluster node's minimum-Q partner is an external witness
+    /// (or once `target_roots` subtrees remain), that subtree root graduates directly to the
+    /// next tournament level rather than being forced into an artificial monophyletic cluster.
+    #[allow(clippy::too_many_arguments)]
+    fn agglomerate_witnessed_cluster(
+        &self,
+        cluster_nodes: &[usize],
+        witness_nodes: &[usize],
+        seqs: &mut HashMap<usize, PackedSeq64>,
+        site_weights: &[f64],
+        word_weight_sums: &[f64],
+        l_eff: f64,
+        adj: &mut BTreeMap<usize, Vec<usize>>,
+        node_labels: &mut BTreeMap<usize, String>,
+        next_node: &mut usize,
+        target_roots: usize,
+    ) -> Vec<usize> {
+        let m_c = cluster_nodes.len();
+        if m_c <= target_roots.max(1) {
+            return cluster_nodes.to_vec();
+        }
+        let mut local_to_global: Vec<usize> =
+            Vec::with_capacity(m_c + witness_nodes.len());
+        let mut is_witness: Vec<bool> =
+            Vec::with_capacity(2 * m_c + witness_nodes.len() + 2);
+        for &u in cluster_nodes {
+            local_to_global.push(u);
+            is_witness.push(false);
+        }
+        for &w in witness_nodes {
+            if !local_to_global.contains(&w) {
+                local_to_global.push(w);
+                is_witness.push(true);
+            }
+        }
+        let m_tot = local_to_global.len();
+        let cap = m_tot + m_c + 2;
+        let mut d_mat = vec![0.0_f64; cap * cap];
+        let mut v_mat = vec![0.0_f64; cap * cap];
+
+        for i in 0..m_tot {
+            let si = &seqs[&local_to_global[i]];
+            for j in (i + 1)..m_tot {
+                let sj = &seqs[&local_to_global[j]];
+                let d_val = Self::compute_pair_jc_dist_packed(
+                    si,
+                    sj,
+                    site_weights,
+                    word_weight_sums,
+                    l_eff,
+                );
+                let v_val = d_val.max(0.5) * (1.0 + (d_val / l_eff.max(1.0)).powi(2));
+                d_mat[i * cap + j] = d_val;
+                d_mat[j * cap + i] = d_val;
+                v_mat[i * cap + j] = v_val;
+                v_mat[j * cap + i] = v_val;
+            }
+        }
+
+        let mut active: Vec<usize> = (0..m_tot).collect();
+        let mut row_sums = vec![0.0_f64; cap];
+        for i in 0..m_tot {
+            let mut s = 0.0_f64;
+            for j in 0..m_tot {
+                s += d_mat[i * cap + j];
+            }
+            row_sums[i] = s;
+        }
+
+        let mut active_c_count = m_c;
+        let mut graduated: Vec<usize> = Vec::new();
+
+        while active_c_count > target_roots && active_c_count >= 2 {
+            let k = active.len();
+            let k_m2 = ((k as f64) - 2.0).max(1.0);
+            let mut best_cc_q = f64::INFINITY;
+            let mut best_cc_pair = (0usize, 1usize);
+
+            for a in 0..k {
+                let la = active[a];
+                if is_witness[la] {
+                    continue;
+                }
+                let ra = row_sums[la];
+                for b in (a + 1)..k {
+                    let lb = active[b];
+                    if is_witness[lb] {
+                        continue;
+                    }
+                    let q_val = k_m2 * d_mat[la * cap + lb] - ra - row_sums[lb];
+                    if q_val < best_cc_q {
+                        best_cc_q = q_val;
+                        best_cc_pair = (a, b);
+                    }
+                }
+            }
+
+            let (a_pos, b_pos) = best_cc_pair;
+            let lu = active[a_pos];
+            let lv = active[b_pos];
+            let gu = local_to_global[lu];
+            let gv = local_to_global[lv];
+
+            let gw = *next_node;
+            *next_node += 1;
+            let lw = local_to_global.len();
+            local_to_global.push(gw);
+            is_witness.push(false);
+
+            adj.entry(gw).or_default().extend([gu, gv]);
+            adj.entry(gu).or_default().push(gw);
+            adj.entry(gv).or_default().push(gw);
+            node_labels.insert(gw, format!("N{gw}"));
+
+            let others: Vec<usize> = active
+                .iter()
+                .copied()
+                .filter(|&x| x != lu && x != lv)
+                .collect();
+            let gr = others
+                .iter()
+                .copied()
+                .min_by(|&a, &b| {
+                    (d_mat[lu * cap + a] + d_mat[lv * cap + a])
+                        .partial_cmp(&(d_mat[lu * cap + b] + d_mat[lv * cap + b]))
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .map(|lx| local_to_global[lx])
+                .unwrap_or(gu);
+            let sw = PackedSeq64::merge_steiner_median(&seqs[&gu], &seqs[&gv], &seqs[&gr]);
+            seqs.insert(gw, sw);
+
+            let d_uv = d_mat[lu * cap + lv];
+            let v_uv = v_mat[lu * cap + lv].max(1e-6);
+            let lam = if !others.is_empty() {
+                let lam_num: f64 = others
+                    .iter()
+                    .map(|&x| v_mat[lv * cap + x] - v_mat[lu * cap + x])
+                    .sum();
+                (0.5 + lam_num / (2.0 * (others.len() as f64) * v_uv)).clamp(0.05, 0.95)
+            } else {
+                0.5
+            };
+
+            let limb_u = (0.5 * d_uv + (row_sums[lu] - row_sums[lv]) / (2.0 * k_m2)).max(0.0);
+            let limb_v = (d_uv - limb_u).max(0.0);
+
+            let mut rw_sum = 0.0_f64;
+            for &lx in &others {
+                let d_ux = d_mat[lu * cap + lx];
+                let d_vx = d_mat[lv * cap + lx];
+                let d_wx = (lam * (d_ux - limb_u) + (1.0 - lam) * (d_vx - limb_v)).max(0.0);
+                let v_wx = (lam * v_mat[lu * cap + lx]
+                    + (1.0 - lam) * v_mat[lv * cap + lx]
+                    - lam * (1.0 - lam) * v_uv)
+                    .max(0.25);
+                d_mat[lw * cap + lx] = d_wx;
+                d_mat[lx * cap + lw] = d_wx;
+                v_mat[lw * cap + lx] = v_wx;
+                v_mat[lx * cap + lw] = v_wx;
+                row_sums[lx] += d_wx - d_ux - d_vx;
+                rw_sum += d_wx;
+            }
+            row_sums[lw] = rw_sum;
+
+            active.retain(|&x| x != lu && x != lv);
+            active.push(lw);
+            active_c_count -= 1;
+        }
+
+        for &lx in &active {
+            if !is_witness[lx] {
+                graduated.push(local_to_global[lx]);
+            }
+        }
+        graduated
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1809,8 +2260,8 @@ impl BushwhackerEngine {
             adj.get_mut(&1).unwrap().push(0);
             return (vec![ld, ld], adj, node_labels);
         }
-        if n <= 1024 {
-            // Exact SIMD + parallel O(N^2) agglomeration path for N <= 1024
+        if n <= 128 {
+            // Exact SIMD + parallel O(N^2) agglomeration path for N <= 128
             #[cfg(not(target_arch = "wasm32"))]
             let uw_rows: Vec<Vec<f64>> = (0..n)
                 .into_par_iter()
@@ -1953,7 +2404,7 @@ impl BushwhackerEngine {
             return (loads, adj, node_labels);
         }
 
-        // Sub-Quadratic O(N log N * L) Hierarchical Tournament Path for N > 128
+        // Sub-Quadratic O(N log N * L) Outgroup-Portal Divide-and-Conquer Path for N > 128
         let mut seqs_map: HashMap<usize, PackedSeq64> =
             packed_vec.into_iter().enumerate().collect();
         let mut leaf_clusters: Vec<Vec<usize>> = Vec::new();
@@ -2024,29 +2475,49 @@ impl BushwhackerEngine {
             }
         }
 
-        // Hierarchical bottom-up cluster agglomeration into a single degree-3 binary backbone
+        // Outgroup-Witnessed Partial Agglomeration tournament in O(N log N * L / 64)
         let mut next_node = n;
-        let mut current_roots: Vec<usize> = Vec::with_capacity(leaf_clusters.len());
-        for cluster in &leaf_clusters {
-            let r = self.agglomerate_bounded_cluster(
-                cluster,
-                &mut seqs_map,
-                dist_weights,
-                &word_weight_sums,
-                l,
-                l_eff,
-                &mut adj,
-                &mut node_labels,
-                &mut next_node,
-                true,
-            );
-            current_roots.push(r);
-        }
-
-        while current_roots.len() > 64 {
+        let mut current_clusters = leaf_clusters;
+        let current_roots: Vec<usize> = loop {
+            let n_cl = current_clusters.len();
+            let mut next_roots = Vec::new();
+            for (c_idx, cluster) in current_clusters.iter().enumerate() {
+                let mut witnesses: Vec<usize> = Vec::with_capacity(20);
+                if c_idx > 0 {
+                    for &w in current_clusters[c_idx - 1].iter().rev().take(6) {
+                        witnesses.push(w);
+                    }
+                }
+                if c_idx + 1 < n_cl {
+                    for &w in current_clusters[c_idx + 1].iter().take(6) {
+                        witnesses.push(w);
+                    }
+                }
+                for (step_i, &ga) in global_anchors.iter().enumerate() {
+                    if step_i % 4 == 0 && !cluster.contains(&ga) {
+                        witnesses.push(ga);
+                    }
+                }
+                let grad = self.agglomerate_witnessed_cluster(
+                    cluster,
+                    &witnesses,
+                    &mut seqs_map,
+                    dist_weights,
+                    &word_weight_sums,
+                    l_eff,
+                    &mut adj,
+                    &mut node_labels,
+                    &mut next_node,
+                    8,
+                );
+                next_roots.extend(grad);
+            }
+            if next_roots.len() <= 96 {
+                break next_roots;
+            }
             let mut super_clusters: Vec<Vec<usize>> = Vec::new();
             Self::partition_items_recursive(
-                current_roots,
+                next_roots,
                 &seqs_map,
                 dist_weights,
                 &word_weight_sums,
@@ -2054,24 +2525,8 @@ impl BushwhackerEngine {
                 64,
                 &mut super_clusters,
             );
-            let mut next_roots = Vec::with_capacity(super_clusters.len());
-            for sc in &super_clusters {
-                let r = self.agglomerate_bounded_cluster(
-                    sc,
-                    &mut seqs_map,
-                    dist_weights,
-                    &word_weight_sums,
-                    l,
-                    l_eff,
-                    &mut adj,
-                    &mut node_labels,
-                    &mut next_node,
-                    true,
-                );
-                next_roots.push(r);
-            }
-            current_roots = next_roots;
-        }
+            current_clusters = super_clusters;
+        };
 
         self.agglomerate_bounded_cluster(
             &current_roots,
@@ -2086,7 +2541,7 @@ impl BushwhackerEngine {
             false,
         );
 
-        let nni_rounds = if n <= 256 { 5 } else { 3 };
+        let nni_rounds = if n <= 1024 { 5 } else { 3 };
         self.refine_backbone_nni_mdl(
             &mut adj,
             bitmasks,
@@ -4271,16 +4726,14 @@ impl BushwhackerEngine {
         let mut best_data_sav = 0.0_f64;
         let mut best_mask_cost = base_mask_cost;
 
+        let l_val_total = (l.saturating_sub(gap_pref[l] as usize)).max(1) as f64;
         for i in 0..k {
             let a = cand_sites[i];
             for j in (i + min_k - 1)..k {
                 let b = cand_sites[j];
                 let span_len = b - a + 1;
                 let m_in = j - i + 1;
-                if span_len < 15
-                    || (span_len as f64) > 0.55 * (l as f64)
-                    || span_len > 55 * m_in
-                {
+                if span_len < 15 || (span_len as f64) > 0.55 * (l as f64) {
                     continue;
                 }
                 let gaps_in = (gap_pref[b + 1] - gap_pref[a]) as usize;
@@ -4299,23 +4752,29 @@ impl BushwhackerEngine {
                     }
                 }
                 let disc_f = discordant as f64;
-                let outside_disc = (total_disc_best - discordant).max(0) as f64;
-                let outside_len = (l.saturating_sub(span_len)).max(1) as f64;
-                let inside_rate = disc_f / (span_len as f64);
-                let outside_rate = outside_disc / outside_len;
-                if disc_f > 0.25 * (m_in as f64)
-                    || inside_rate > 0.03
-                    || outside_disc < 4.0
-                    || inside_rate > 0.35 * outside_rate
-                {
+                let d_all = (total_disc_best as f64).max(disc_f);
+                let d_out = (d_all - disc_f).max(0.0);
+                let w_val = (span_len.saturating_sub(gaps_in)).max(1) as f64;
+                let out_val = (l_val_total - w_val).max(1.0);
+                if disc_f > 0.25 * (m_in as f64) || (disc_f / w_val) >= (d_out / out_val) {
                     continue;
                 }
+                // Exact combinadic block-homogeneity gain of partitioning (u, v) divergence at (a, b):
+                // Delta L_block = ln C(L_val, D_all) - ln C(W_val, D_in) - ln C(L_out, D_out)
+                let block_kl_gain = (log_binom(l_val_total, d_all)
+                    - log_binom(w_val, disc_f)
+                    - log_binom(out_val, d_out))
+                    .max(0.0);
+                let w_pool = (w_val * (variable_sites as f64) / l_val_total)
+                    .max(m_in as f64);
+                let window_addr_cost =
+                    (log_binom(w_pool, m_in as f64) - block_kl_gain).max(0.0);
                 let disc_cost = if discordant > 0 {
                     branch_mutation_code_nats(disc_f, span_len as f64, 0.0, 4)
                 } else {
                     0.0
                 };
-                let total_mask_cost = base_mask_cost + disc_cost;
+                let total_mask_cost = base_mask_cost + disc_cost + window_addr_cost;
                 let data_sav = sav_pref[j + 1] - sav_pref[i];
                 let net_gain = data_sav - endpoint_cost - total_mask_cost;
                 if net_gain > best_gain {

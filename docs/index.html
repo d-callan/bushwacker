@@ -1494,26 +1494,9 @@
     // -----------------------------------------------------------------------
     // 4. Convert BUSHWHACKER Graph or Arbitrary Newick into Rooted Layout Tree
     // -----------------------------------------------------------------------
-    function extractFluSamplingYear(rawName) {
-      const m = rawName.match(/(\d{2})$/);
-      if (m) {
-        const y = parseInt(m[1], 10);
-        if (y >= 68 && y <= 98) return 1900 + y;
-      }
-      return null;
-    }
-
     function inferTaxonGroup(rawName) {
       if (PRESTIN_TAXONOMY[rawName]) {
         return PRESTIN_TAXONOMY[rawName].group;
-      }
-      const yr = extractFluSamplingYear(rawName);
-      if (yr !== null && currentResult && currentResult.n_taxa >= 200) {
-        if (yr <= 1987) return '1983–1987';
-        if (yr <= 1990) return '1988–1990';
-        if (yr <= 1992) return '1991–1992';
-        if (yr <= 1994) return '1993–1994';
-        return String(yr);
       }
       if (rawName.includes('_')) {
         return rawName.split('_')[0];
@@ -1527,6 +1510,54 @@
         return `${PRESTIN_TAXONOMY[rawName].name} [${rawName}]`;
       }
       return rawName;
+    }
+
+    function findUnsupervisedDiameterMidpointRoot(adj, branchMap, n) {
+      function farthestNodeFrom(startNode) {
+        const dist = new Map([[startNode, 0]]);
+        const parent = new Map([[startNode, null]]);
+        const queue = [startNode];
+        let bestLeaf = startNode;
+        let maxD = -1;
+        for (let head = 0; head < queue.length; head++) {
+          const u = queue[head];
+          const du = dist.get(u);
+          if (u < n && du > maxD) {
+            maxD = du;
+            bestLeaf = u;
+          }
+          const nbs = adj.get(u) || [];
+          for (const v of nbs) {
+            if (!dist.has(v)) {
+              const rec = branchMap.get(`${Math.min(u, v)}_${Math.max(u, v)}`);
+              const w = rec ? Math.max(rec.branch_length, 1e-6) : 1e-4;
+              dist.set(v, du + w);
+              parent.set(v, u);
+              queue.push(v);
+            }
+          }
+        }
+        return { bestLeaf, maxD, dist, parent };
+      }
+
+      if (!adj.has(0) || n < 3) return adj.has(n) ? n : 0;
+      const pass1 = farthestNodeFrom(0);
+      const pass2 = farthestNodeFrom(pass1.bestLeaf);
+      const halfD = pass2.maxD * 0.5;
+      let cur = pass2.bestLeaf;
+      let bestInternal = adj.has(n) ? n : 0;
+      let bestDiff = Infinity;
+      while (cur !== null && cur !== undefined) {
+        if (cur >= n) {
+          const diff = Math.abs((pass2.dist.get(cur) || 0) - halfD);
+          if (diff < bestDiff) {
+            bestDiff = diff;
+            bestInternal = cur;
+          }
+        }
+        cur = pass2.parent.get(cur);
+      }
+      return bestInternal;
     }
 
     function buildTreeFromBushwhackerResult(res) {
@@ -1547,33 +1578,8 @@
         branchMap.set(key, b);
       }
 
-      // If dataset has temporal sampling years on >=80% of leaves (e.g. Influenza A ladder),
-      // root at the internal node adjacent to the earliest-year isolate so trunk flows left-to-right!
-      let rootId = n;
-      let bestDeg = -1;
-      let yearCount = 0;
-      let earliestLeaf = -1;
-      let earliestYear = 99999;
-      for (let i = 0; i < n; i++) {
-        const yr = extractFluSamplingYear(res.names[i] || '');
-        if (yr !== null) {
-          yearCount++;
-          if (yr < earliestYear) {
-            earliestYear = yr;
-            earliestLeaf = i;
-          }
-        }
-      }
-      if (yearCount >= Math.floor(0.75 * n) && earliestLeaf >= 0 && (adj.get(earliestLeaf) || []).length > 0) {
-        rootId = adj.get(earliestLeaf)[0];
-      } else {
-        for (const [u, nbs] of adj.entries()) {
-          if (u >= n && nbs.length > bestDeg) {
-            bestDeg = nbs.length;
-            rootId = u;
-          }
-        }
-      }
+      // Unsupervised metric tree-diameter midpoint rooting (zero label/metadata heuristics)
+      let rootId = findUnsupervisedDiameterMidpointRoot(adj, branchMap, n);
       if (!adj.has(rootId)) rootId = 0;
 
       nodeById.clear();
