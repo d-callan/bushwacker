@@ -1,0 +1,414 @@
+{
+  "stress1_likelihood_paradox": {
+    "polytomy_ml_exceeds_true_logl_pct": 87.5,
+    "polytomy_mean_excess_train_logl": 3.8979000000000497,
+    "polytomy_mean_mdl_true_nats": 3630.650683815679,
+    "polytomy_mean_mdl_ml_nats": 3697.2990009719483,
+    "polytomy_mean_mdl_ours_nats": 3632.9174544211482,
+    "polytomy_heldout_test_mdl_savings_nats": 53.83306521233948,
+    "polytomy_rf_ml": 16.0,
+    "polytomy_rf_ours": 0.375,
+    "convergent_ml_exceeds_true_logl_pct": 100.0,
+    "convergent_mean_excess_logl": 126.72300000000003,
+    "convergent_mean_mdl_savings_over_ml_nats": 510.180533344954
+  },
+  "stress2_ml_home_turf": {
+    "150": {
+      "mean_realized_splits": 24.75,
+      "methods": {
+        "MDL": {
+          "precision_pct": 93.05,
+          "false_positive_splits": 1.12,
+          "recall_realized_pct": 57.42,
+          "rf_realized": 11.75,
+          "rf_nominal": 15.75
+        },
+        "IQTREE_aBayes95": {
+          "precision_pct": 98.86,
+          "false_positive_splits": 0.12,
+          "recall_realized_pct": 55.72,
+          "rf_realized": 11.0,
+          "rf_nominal": 15.25
+        },
+        "IQTREE_Raw": {
+          "precision_pct": 78.45,
+          "false_positive_splits": 6.25,
+          "recall_realized_pct": 88.77,
+          "rf_realized": 9.75,
+          "rf_nominal": 12.5
+        },
+        "FastTree_Raw": {
+          "precision_pct": 78.45,
+          "false_positive_splits": 6.25,
+          "recall_realized_pct": 88.88,
+          "rf_realized": 9.75,
+          "rf_nominal": 12.5
+        },
+        "NJ_JC": {
+          "precision_pct": 75.43,
+          "false_positive_splits": 7.12,
+          "recall_realized_pct": 85.42,
+          "rf_realized": 11.5,
+          "rf_nominal": 14.25
+        },
+        "MP": {
+          "precision_pct": 75.43,
+          "false_positive_splits": 7.12,
+          "recall_realized_pct": 85.38,
+          "rf_realized": 11.5,
+          "rf_nominal": 14.25
+        }
+      }
+    },
+    "300": {
+      "mean_realized_splits": 27.875,
+      "methods": {
+        "MDL": {
+          "precision_pct": 96.47,
+          "false_positive_splits": 0.75,
+          "recall_realized_pct": 69.72,
+          "rf_realized": 9.25,
+          "rf_nominal": 10.38
+        },
+        "IQTREE_aBayes95": {
+          "precision_pct": 100.0,
+          "false_positive_splits": 0.0,
+          "recall_realized_pct": 70.13,
+          "rf_realized": 8.38,
+          "rf_nominal": 9.5
+        },
+        "IQTREE_Raw": {
+          "precision_pct": 94.4,
+          "false_positive_splits": 1.62,
+          "recall_realized_pct": 97.81,
+          "rf_realized": 2.38,
+          "rf_nominal": 3.25
+        },
+        "FastTree_Raw": {
+          "precision_pct": 93.97,
+          "false_positive_splits": 1.75,
+          "recall_realized_pct": 97.37,
+          "rf_realized": 2.62,
+          "rf_nominal": 3.5
+        },
+        "NJ_JC": {
+          "precision_pct": 90.95,
+          "false_positive_splits": 2.62,
+          "recall_realized_pct": 93.87,
+          "rf_realized": 4.62,
+          "rf_nominal": 5.25
+        },
+        "MP": {
+          "precision_pct": 92.67,
+          "false_positive_splits": 2.12,
+          "recall_realized_pct": 96.03,
+          "rf_realized": 3.38,
+          "rf_nominal": 4.25
+        }
+      }
+    },
+    "600": {
+      "mean_realized_splits": 29.0,
+      "methods": {
+        "MDL": {
+          "precision_pct": 98.11,
+          "false_positive_splits": 0.5,
+          "recall_realized_pct": 85.78,
+          "rf_realized": 4.62,
+          "rf_nominal": 4.62
+        },
+        "IQTREE_aBayes95": {
+          "precision_pct": 100.0,
+          "false_positive_splits": 0.0,
+          "recall_realized_pct": 87.93,
+          "rf_realized": 3.5,
+          "rf_nominal": 3.5
+        },
+        "IQTREE_Raw": {
+          "precision_pct": 98.28,
+          "false_positive_splits": 0.5,
+          "recall_realized_pct": 98.28,
+          "rf_realized": 1.0,
+          "rf_nominal": 1.0
+        },
+        "FastTree_Raw": {
+          "precision_pct": 99.14,
+          "false_positive_splits": 0.25,
+          "recall_realized_pct": 99.14,
+          "rf_realized": 0.5,
+          "rf_nominal": 0.5
+        },
+        "NJ_JC": {
+          "precision_pct": 98.28,
+          "false_positive_splits": 0.5,
+          "recall_realized_pct": 98.28,
+          "rf_realized": 1.0,
+          "rf_nominal": 1.0
+        },
+        "MP": {
+          "precision_pct": 98.71,
+          "false_positive_splits": 0.38,
+          "recall_realized_pct": 98.71,
+          "rf_realized": 0.75,
+          "rf_nominal": 0.75
+        }
+      }
+    },
+    "1500": {
+      "mean_realized_splits": 29.0,
+      "methods": {
+        "MDL": {
+          "precision_pct": 100.0,
+          "false_positive_splits": 0.0,
+          "recall_realized_pct": 95.26,
+          "rf_realized": 1.38,
+          "rf_nominal": 1.38
+        },
+        "IQTREE_aBayes95": {
+          "precision_pct": 100.0,
+          "false_positive_splits": 0.0,
+          "recall_realized_pct": 97.84,
+          "rf_realized": 0.62,
+          "rf_nominal": 0.62
+        },
+        "IQTREE_Raw": {
+          "precision_pct": 100.0,
+          "false_positive_splits": 0.0,
+          "recall_realized_pct": 100.0,
+          "rf_realized": 0.0,
+          "rf_nominal": 0.0
+        },
+        "FastTree_Raw": {
+          "precision_pct": 100.0,
+          "false_positive_splits": 0.0,
+          "recall_realized_pct": 100.0,
+          "rf_realized": 0.0,
+          "rf_nominal": 0.0
+        },
+        "NJ_JC": {
+          "precision_pct": 100.0,
+          "false_positive_splits": 0.0,
+          "recall_realized_pct": 100.0,
+          "rf_realized": 0.0,
+          "rf_nominal": 0.0
+        },
+        "MP": {
+          "precision_pct": 100.0,
+          "false_positive_splits": 0.0,
+          "recall_realized_pct": 100.0,
+          "rf_realized": 0.0,
+          "rf_nominal": 0.0
+        }
+      }
+    }
+  },
+  "stress3_support_collapsed": {
+    "polytomy_methods": {
+      "MDL (No Bootstrap)": {
+        "fp": 0.0,
+        "fpr_pct": 0.0,
+        "precision_pct": 100.0,
+        "recall_pct": 99.04,
+        "rf_error": 0.12,
+        "time_sec": 0.283
+      },
+      "IQTREE Raw Binary": {
+        "fp": 16.0,
+        "fpr_pct": 100.0,
+        "precision_pct": 44.83,
+        "recall_pct": 100.0,
+        "rf_error": 16.0,
+        "time_sec": 14.94
+      },
+      "IQTREE SH-aLRT>=80": {
+        "fp": 0.25,
+        "fpr_pct": 1.56,
+        "precision_pct": 98.21,
+        "recall_pct": 99.04,
+        "rf_error": 0.38,
+        "time_sec": 14.94
+      },
+      "IQTREE aBayes>=0.95": {
+        "fp": 0.12,
+        "fpr_pct": 0.78,
+        "precision_pct": 99.11,
+        "recall_pct": 99.04,
+        "rf_error": 0.25,
+        "time_sec": 14.94
+      },
+      "IQTREE UFBoot>=95": {
+        "fp": 0.0,
+        "fpr_pct": 0.0,
+        "precision_pct": 100.0,
+        "recall_pct": 94.23,
+        "rf_error": 0.75,
+        "time_sec": 14.94
+      },
+      "FastTree SH>=0.90": {
+        "fp": 3.5,
+        "fpr_pct": 21.88,
+        "precision_pct": 78.75,
+        "recall_pct": 98.08,
+        "rf_error": 3.75,
+        "time_sec": 0.221
+      },
+      "FastTree SH>=0.95": {
+        "fp": 2.38,
+        "fpr_pct": 14.84,
+        "precision_pct": 82.53,
+        "recall_pct": 84.62,
+        "rf_error": 4.38,
+        "time_sec": 0.221
+      },
+      "NJ (JC69)": {
+        "fp": 16.0,
+        "fpr_pct": 100.0,
+        "precision_pct": 44.83,
+        "recall_pct": 100.0,
+        "rf_error": 16.0,
+        "time_sec": 0.003
+      },
+      "Max Parsimony": {
+        "fp": 16.0,
+        "fpr_pct": 100.0,
+        "precision_pct": 44.83,
+        "recall_pct": 100.0,
+        "rf_error": 16.0,
+        "time_sec": 0.005
+      }
+    },
+    "convergent_false_clade_rate": {
+      "MDL_false_convergent_clades_pct": 0.0,
+      "IQTREE_aBayes95_confident_false_clades_pct": 47.92,
+      "IQTREE_UFBoot95_confident_false_clades_pct": 10.42
+    }
+  },
+  "stress4_large_lba": {
+    "multi_clade_parasite_lba": {
+      "MDLPhyloEngine": {
+        "true_parasite_host_sister_recall_pct": 100.0,
+        "false_parasite_clade_lba_rate_pct": 0.0
+      },
+      "IQTREE2 (GTR+G)": {
+        "true_parasite_host_sister_recall_pct": 100.0,
+        "false_parasite_clade_lba_rate_pct": 0.0
+      },
+      "FastTree2": {
+        "true_parasite_host_sister_recall_pct": 100.0,
+        "false_parasite_clade_lba_rate_pct": 0.0
+      },
+      "NJ (JC69)": {
+        "true_parasite_host_sister_recall_pct": 100.0,
+        "false_parasite_clade_lba_rate_pct": 0.0
+      },
+      "Max Parsimony": {
+        "true_parasite_host_sister_recall_pct": 100.0,
+        "false_parasite_clade_lba_rate_pct": 0.0
+      }
+    },
+    "kolaczkowski_thornton_heterotachy": {
+      "MDLPhyloEngine": {
+        "true_split_pct": 95.0,
+        "lba_trap_pct": 0.0
+      },
+      "IQTREE2 (GTR+G)": {
+        "true_split_pct": 100.0,
+        "lba_trap_pct": 0.0
+      },
+      "FastTree2": {
+        "true_split_pct": 100.0,
+        "lba_trap_pct": 0.0
+      },
+      "NJ (JC69)": {
+        "true_split_pct": 100.0,
+        "lba_trap_pct": 0.0
+      },
+      "Max Parsimony": {
+        "true_split_pct": 0.0,
+        "lba_trap_pct": 100.0
+      }
+    }
+  },
+  "stress5_prestin_head_to_head": {
+    "MDLPhyloEngine (Ours)": {
+      "inferred_splits": 83,
+      "true_positives": 73,
+      "false_positives": 10,
+      "precision_pct": 87.95,
+      "recall_pct": 73.0,
+      "f1_pct": 79.78,
+      "rf_error": 37,
+      "time_sec": 2.79
+    },
+    "IQTREE2 (aBayes>=0.95)": {
+      "inferred_splits": 74,
+      "true_positives": 71,
+      "false_positives": 3,
+      "precision_pct": 95.95,
+      "recall_pct": 71.0,
+      "f1_pct": 81.61,
+      "rf_error": 32,
+      "time_sec": 48.87
+    },
+    "IQTREE2 (SH-aLRT>=80)": {
+      "inferred_splits": 73,
+      "true_positives": 68,
+      "false_positives": 5,
+      "precision_pct": 93.15,
+      "recall_pct": 68.0,
+      "f1_pct": 78.61,
+      "rf_error": 37,
+      "time_sec": 48.87
+    },
+    "IQTREE2 (GTR+G Raw)": {
+      "inferred_splits": 100,
+      "true_positives": 81,
+      "false_positives": 19,
+      "precision_pct": 81.0,
+      "recall_pct": 81.0,
+      "f1_pct": 81.0,
+      "rf_error": 38,
+      "time_sec": 48.87
+    },
+    "FastTree2 (SH>=0.90)": {
+      "inferred_splits": 66,
+      "true_positives": 64,
+      "false_positives": 2,
+      "precision_pct": 96.97,
+      "recall_pct": 64.0,
+      "f1_pct": 77.11,
+      "rf_error": 38,
+      "time_sec": 2.39
+    },
+    "FastTree2 (GTR+CAT)": {
+      "inferred_splits": 100,
+      "true_positives": 82,
+      "false_positives": 18,
+      "precision_pct": 82.0,
+      "recall_pct": 82.0,
+      "f1_pct": 82.0,
+      "rf_error": 36,
+      "time_sec": 2.39
+    },
+    "Neighbor-Joining (JC)": {
+      "inferred_splits": 100,
+      "true_positives": 76,
+      "false_positives": 24,
+      "precision_pct": 76.0,
+      "recall_pct": 76.0,
+      "f1_pct": 76.0,
+      "rf_error": 48,
+      "time_sec": 0.07
+    },
+    "Max Parsimony (NNI)": {
+      "inferred_splits": 100,
+      "true_positives": 78,
+      "false_positives": 22,
+      "precision_pct": 78.0,
+      "recall_pct": 78.0,
+      "f1_pct": 78.0,
+      "rf_error": 44,
+      "time_sec": 0.14
+    }
+  }
+}

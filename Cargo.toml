@@ -1,0 +1,21 @@
+[package]
+name = "bushwhacker"
+version = "0.1.0"
+edition = "2021"
+authors = ["Sergei L. Kosakovsky Pond <spond@temple.edu>"]
+description = "BUSHWHACKER: Bipartition Unification, Shunt Hunting, & Weighted Hub Aggregation via Combinadic Kolmogorov Entropy Reduction"
+license = "MIT"
+repository = "https://github.com/veg/bushwacker"
+
+[lib]
+name = "bushwhacker"
+path = "src/lib.rs"
+
+[[bin]]
+name = "bushwhacker"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1

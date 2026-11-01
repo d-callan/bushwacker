@@ -1,0 +1,19 @@
+# Rust build artifacts
+/target/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# LaTeX build artifacts
+*.aux
+*.log
+*.out
+*.toc
+*.synctex.gz
+*.fls
+*.fdb_latexmk
+
+# OS files
+.DS_Store
