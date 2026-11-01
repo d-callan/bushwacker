@@ -3,7 +3,7 @@ use std::fs;
 use std::path::Path;
 use std::process;
 
-use bushwhacker::{parse_fasta_file, BushwhackerEngine, BushwhackerResult};
+use bushwhacker::{parse_alignment_file, BushwhackerEngine, BushwhackerResult};
 
 fn print_usage(prog: &str) {
     eprintln!(
@@ -11,7 +11,11 @@ fn print_usage(prog: &str) {
          (Bipartition Unification, Shunt Hunting, & Weighted Hub Aggregation via\n\
           Combinadic Kolmogorov Entropy Reduction)\n\n\
          Usage:\n  \
-           {prog} <input.fasta> [options]\n\n\
+           {prog} <input.fasta|phylip|nexus> [options]\n\n\
+         Supported Input Formats (auto-detected):\n  \
+           - FASTA   (.fa, .fasta, .fna)\n  \
+           - PHYLIP  (.phy, .phylip; strict 10-char or relaxed, sequential or interleaved)\n  \
+           - NEXUS   (.nex, .nexus, .nxs; DATA or CHARACTERS blocks, sequential or interleaved)\n\n\
          Options:\n  \
            -o, --out-newick <PATH>      Output Newick file path (with MDL branch supports & lengths)\n  \
            -j, --out-json <PATH>        Output JSON report path (full MDL ledger, splits, & shunts)\n  \
@@ -197,8 +201,8 @@ fn main() {
         process::exit(1);
     };
 
-    let (names, seqs) = parse_fasta_file(Path::new(&fasta)).unwrap_or_else(|e| {
-        eprintln!("Error reading FASTA '{fasta}': {e}");
+    let (names, seqs) = parse_alignment_file(Path::new(&fasta)).unwrap_or_else(|e| {
+        eprintln!("Error reading alignment '{fasta}': {e}");
         process::exit(1);
     });
 

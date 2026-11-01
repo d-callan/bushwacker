@@ -203,33 +203,176 @@ CODON_TABLE = {
 }
 
 
+def _finalize_alignment_py(names: List[str], seqs: List[str]) -> Tuple[List[str], List[str]]:
+    if not names or not seqs:
+        raise ValueError("No alignment records found.")
+    max_len = max(len(s) for s in seqs)
+    seqs = [s + "-" * (max_len - len(s)) if len(s) < max_len else s for s in seqs]
+    ref = seqs[0]
+    for i in range(1, len(seqs)):
+        if "." in seqs[i]:
+            seqs[i] = "".join(ref[j] if ch == "." else ch for j, ch in enumerate(seqs[i]))
+    return names, seqs
+
+
+def parse_phylip_text(text: str) -> Tuple[List[str], List[str]]:
+    lines = [l.rstrip("\r\n") for l in text.lstrip("\ufeff").splitlines() if l.strip()]
+    if not lines:
+        raise ValueError("Empty PHYLIP input.")
+    hdr = lines[0].split()
+    ntax, nchar = int(hdr[0]), int(hdr[1])
+    data_lines = lines[1:]
+
+    def split_named(line: str) -> Tuple[str, str]:
+        s = line.strip()
+        parts = s.split(None, 1)
+        if len(parts) == 2:
+            if len(line) > 10 and len(parts[0]) > 10:
+                strict_nm = line[:10].strip().replace(" ", "_")
+                strict_sq = "".join(line[10:].split())
+                if len(strict_sq) == nchar or len(parts[0]) - 10 == 10:
+                    return strict_nm, strict_sq
+            return parts[0], "".join(parts[1].split())
+        return line[:10].strip().replace(" ", "_"), "".join(line[10:].split())
+
+    if len(data_lines) == ntax:
+        names, seqs = zip(*(split_named(l) for l in data_lines))
+        return _finalize_alignment_py(list(names), list(seqs))
+
+    # Try interleaved first
+    try:
+        names, seqs = [], []
+        for i in range(ntax):
+            nm, sq = split_named(data_lines[i])
+            names.append(nm)
+            seqs.append(sq)
+        if len(set(len(s) for s in seqs)) == 1 and len(seqs[0]) > 0:
+            for idx in range(ntax, len(data_lines)):
+                t = idx % ntax
+                raw = data_lines[idx].strip()
+                if raw.startswith(names[t]) and len(raw) > len(names[t]) and raw[len(names[t])].isspace():
+                    raw = raw[len(names[t]):]
+                seqs[t] += "".join(raw.split())
+            if all(len(s) == nchar for s in seqs):
+                return _finalize_alignment_py(names, seqs)
+    except Exception:
+        pass
+
+    # Sequential multi-line fallback
+    names, seqs = [], []
+    idx = 0
+    for _ in range(ntax):
+        nm, sq = split_named(data_lines[idx])
+        idx += 1
+        while len(sq) < nchar and idx < len(data_lines):
+            sq += "".join(data_lines[idx].split())
+            idx += 1
+        names.append(nm)
+        seqs.append(sq)
+    return _finalize_alignment_py(names, seqs)
+
+
+def parse_nexus_text(text: str) -> Tuple[List[str], List[str]]:
+    import re
+    # Strip [...] comments while preserving newlines
+    out, depth, in_sq, in_dq = [], 0, False, False
+    for ch in text.lstrip("\ufeff"):
+        if depth > 0:
+            if ch == "[":
+                depth += 1
+            elif ch == "]":
+                depth -= 1
+            elif ch == "\n":
+                out.append("\n")
+            continue
+        if ch == "'" and not in_dq:
+            in_sq = not in_sq
+            out.append(ch)
+        elif ch == '"' and not in_sq:
+            in_dq = not in_dq
+            out.append(ch)
+        elif ch == "[" and not in_sq and not in_dq:
+            depth = 1
+        else:
+            out.append(ch)
+    clean = "".join(out)
+    m = re.search(r"\bMATRIX\b([\s\S]*?);", clean, flags=re.IGNORECASE)
+    if not m:
+        raise ValueError("No MATRIX block found in NEXUS input.")
+    body = m.group(1)
+    names: List[str] = []
+    seqs: List[str] = []
+    name_to_idx: Dict[str, int] = {}
+    for raw_line in body.splitlines():
+        s = raw_line.strip()
+        if not s:
+            continue
+        if s[0] in ("'", '"'):
+            q = s[0]
+            end_q = s.find(q, 1)
+            if end_q != -1:
+                nm = s[1:end_q].strip().replace(" ", "_")
+                sq = "".join(s[end_q + 1:].split())
+            else:
+                continue
+        else:
+            parts = s.split(None, 1)
+            if len(parts) < 2:
+                if seqs:
+                    seqs[-1] += "".join(s.split())
+                continue
+            nm, sq = parts[0], "".join(parts[1].split())
+        if nm in name_to_idx:
+            seqs[name_to_idx[nm]] += sq
+        else:
+            name_to_idx[nm] = len(names)
+            names.append(nm)
+            seqs.append(sq)
+    return _finalize_alignment_py(names, seqs)
+
+
 def parse_fasta(path_or_dict) -> Tuple[List[str], List[str]]:
-    """Parse FASTA file path or {name: seq} dictionary."""
+    """Parse FASTA, PHYLIP, or NEXUS alignment file path or {name: seq} dictionary."""
     if isinstance(path_or_dict, dict):
         names = list(path_or_dict.keys())
         seqs = [path_or_dict[k] for k in names]
         return names, seqs
+    with open(path_or_dict, "r", encoding="utf-8") as f:
+        text = f.read()
+    clean = text.lstrip("\ufeff")
+    for line in clean.splitlines():
+        s = line.strip()
+        if not s or s.startswith(";"):
+            continue
+        up = s.upper()
+        if up.startswith("#NEXUS") or up.startswith("BEGIN DATA") or up.startswith("BEGIN CHARACTERS"):
+            return parse_nexus_text(clean)
+        if s.startswith(">"):
+            break
+        toks = s.split()
+        if len(toks) >= 2 and toks[0].isdigit() and toks[1].isdigit():
+            return parse_phylip_text(clean)
+        break
     names: List[str] = []
     seqs: List[str] = []
     curr_name: Optional[str] = None
     curr_chunks: List[str] = []
-    with open(path_or_dict, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            if line.startswith(">"):
-                if curr_name is not None:
-                    names.append(curr_name)
-                    seqs.append("".join(curr_chunks))
-                curr_name = line[1:].split()[0]
-                curr_chunks = []
-            else:
-                curr_chunks.append(line)
+    for line in clean.splitlines():
+        line = line.strip()
+        if not line or line.startswith(";"):
+            continue
+        if line.startswith(">"):
+            if curr_name is not None:
+                names.append(curr_name)
+                seqs.append("".join(curr_chunks))
+            curr_name = line[1:].split()[0]
+            curr_chunks = []
+        else:
+            curr_chunks.append("".join(line.split()))
     if curr_name is not None:
         names.append(curr_name)
         seqs.append("".join(curr_chunks))
-    return names, seqs
+    return _finalize_alignment_py(names, seqs)
 
 
 def encode_nucleotide_alignment(seqs: List[str]) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:

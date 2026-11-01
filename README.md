@@ -37,8 +37,8 @@ Every proposed evolutionary structure—an internal tree split `e = (u, v)`, a m
 
 BUSHWHACKER ships with a zero-server, 100% client-side **Rust + WebAssembly** web application ([`docs/index.html`](docs/index.html)) built with the Dieter Rams / Braun industrial functionalist design language (`RhizType`) and high-DPI HTML5 `<canvas>` large-tree rendering inspired by `bigtreeviewer.net`:
 
-- **Alignment $\to$ MDL Graph Mode (Rust WASM):** Drag-and-drop any FASTA alignment or load built-in presets (*Mammalian Prestin `N = 116`*, *Vertebrate β-Globin `N = 17`*, *Adaptive Polytomy Radiation `N = 64`*, *HGT / Recombination Mosaic `N = 24`*, *Large Radiation Stress `N = 512`*) to induce the MDL tree and reticulate shunts in milliseconds directly in the browser.
-- **Big-Tree Newick Explorer Mode:** Paste or upload arbitrary Newick trees (or load synthetic 250 / 1,000 / 2,500-tip super-trees) with optional zero-branch-length ($\ell \le \epsilon$) polytomy contraction.
+- **Alignment $\to$ MDL Graph Mode (Rust WASM):** Drag-and-drop any **FASTA**, **PHYLIP** (strict/relaxed, sequential/interleaved), or **NEXUS** alignment or load built-in presets (*Mammalian Prestin `N = 116`*, *Vertebrate β-Globin `N = 17`*, *Adaptive Polytomy Radiation `N = 64`*, *HGT / Recombination Mosaic `N = 24`*, *Large Radiation Stress `N = 512`*) to induce the MDL tree and reticulate shunts in milliseconds directly in the browser.
+- **Big-Tree Newick / NEXUS Explorer Mode:** Paste or upload arbitrary Newick or NEXUS (`BEGIN TREES;` + `TRANSLATE`) trees (or load synthetic 250 / 1,000 / 2,500-tip super-trees) with optional zero-branch-length ($\ell \le \epsilon$) polytomy contraction.
 - **Multi-Scale Visual Encoding:**
   - **Phylogram**, **Cladogram (Equal)**, and **Circular Ring** layouts with smooth pan/zoom, viewport culling, semantic Level-of-Detail (LOD) label thinning, and a live minimap navigator.
   - **Automatic Taxonomic / Clade Ribbons:** Translates UCSC assembly accessions (`HLturTru3` $\to$ `Bottlenose dolphin [HLturTru3]`) or prefix guilds (`Clade01_...`) into translucent clade sector bands and outer color bars.
@@ -58,7 +58,12 @@ cargo build --release
 ### Usage
 
 ```text
-./target/release/bushwhacker <input.fasta> [options]
+./target/release/bushwhacker <input.fasta|phylip|nexus> [options]
+
+Supported Input Formats (auto-detected):
+  - FASTA   (.fa, .fasta, .fna)
+  - PHYLIP  (.phy, .phylip; strict 10-char or relaxed, sequential or interleaved)
+  - NEXUS   (.nex, .nexus, .nxs; DATA or CHARACTERS blocks, sequential or interleaved)
 
 Options:
   -o, --out-newick <PATH>      Output Newick file path (with MDL branch supports & lengths)

@@ -267,13 +267,110 @@ pub fn translate_bases(b0: i8, b1: i8, b2: i8) -> u8 {
     translate_codon_idx(idx)
 }
 
-pub fn parse_fasta_str(fasta_text: &str) -> Result<(Vec<String>, Vec<String>), String> {
+#[inline]
+fn is_valid_seq_char(ch: char) -> bool {
+    matches!(
+        ch.to_ascii_uppercase(),
+        'A' | 'C'
+            | 'G'
+            | 'T'
+            | 'U'
+            | 'N'
+            | 'R'
+            | 'Y'
+            | 'S'
+            | 'W'
+            | 'K'
+            | 'M'
+            | 'B'
+            | 'D'
+            | 'H'
+            | 'V'
+            | 'X'
+            | '-'
+            | '?'
+            | '.'
+            | '*'
+    )
+}
+
+/// Resolve `.` (match-first-taxon character used in PHYLIP and NEXUS) and pad sequences to uniform length.
+fn finalize_alignment(
+    names: Vec<String>,
+    mut seqs: Vec<String>,
+) -> Result<(Vec<String>, Vec<String>), String> {
+    if names.is_empty() || seqs.is_empty() {
+        return Err("No alignment records found.".to_string());
+    }
+    let max_len = seqs.iter().map(|s| s.len()).max().unwrap_or(0);
+    if max_len == 0 {
+        return Err("Alignment sequences have zero length.".to_string());
+    }
+    for s in &mut seqs {
+        if s.len() < max_len {
+            s.extend(std::iter::repeat('-').take(max_len - s.len()));
+        }
+    }
+    // Resolve '.' match characters against the first sequence
+    let ref_bytes = seqs[0].as_bytes().to_vec();
+    for s in seqs.iter_mut().skip(1) {
+        if s.contains('.') {
+            let mut bytes = s.as_bytes().to_vec();
+            for j in 0..bytes.len().min(ref_bytes.len()) {
+                if bytes[j] == b'.' {
+                    bytes[j] = ref_bytes[j];
+                }
+            }
+            if let Ok(resolved) = String::from_utf8(bytes) {
+                *s = resolved;
+            }
+        }
+    }
+    Ok((names, seqs))
+}
+
+/// Detect alignment format (`"FASTA"`, `"PHYLIP"`, or `"NEXUS"`) from raw text.
+pub fn detect_alignment_format(text: &str) -> &'static str {
+    let clean = text.trim_start_matches('\u{feff}');
+    for line in clean.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with(';') {
+            continue;
+        }
+        let upper = trimmed.to_ascii_uppercase();
+        if upper.starts_with("#NEXUS")
+            || upper.starts_with("BEGIN DATA")
+            || upper.starts_with("BEGIN CHARACTERS")
+            || upper.starts_with("BEGIN TAXA")
+        {
+            return "NEXUS";
+        }
+        if trimmed.starts_with('>') {
+            return "FASTA";
+        }
+        let mut toks = trimmed.split_whitespace();
+        if let (Some(t0), Some(t1)) = (toks.next(), toks.next()) {
+            if t0.parse::<usize>().is_ok() && t1.parse::<usize>().is_ok() {
+                return "PHYLIP";
+            }
+        }
+        break;
+    }
+    let upper_all = clean.to_ascii_uppercase();
+    if upper_all.contains("BEGIN DATA") || upper_all.contains("BEGIN CHARACTERS") {
+        return "NEXUS";
+    }
+    "FASTA"
+}
+
+pub fn parse_fasta_only_str(fasta_text: &str) -> Result<(Vec<String>, Vec<String>), String> {
+    let clean = fasta_text.trim_start_matches('\u{feff}');
     let mut names = Vec::new();
     let mut seqs = Vec::new();
     let mut curr_name: Option<String> = None;
     let mut curr_seq = String::new();
 
-    for line in fasta_text.lines() {
+    for line in clean.lines() {
         let trimmed = line.trim();
         if trimmed.is_empty() || trimmed.starts_with(';') {
             continue;
@@ -304,24 +401,434 @@ pub fn parse_fasta_str(fasta_text: &str) -> Result<(Vec<String>, Vec<String>), S
     if names.is_empty() {
         return Err("No FASTA records found.".to_string());
     }
-    let max_len = seqs.iter().map(|s| s.len()).max().unwrap_or(0);
-    for s in &mut seqs {
-        if s.len() < max_len {
-            s.extend(std::iter::repeat('-').take(max_len - s.len()));
+    finalize_alignment(names, seqs)
+}
+
+/// Split a PHYLIP line that begins a taxon record into `(taxon_name, sequence_chars)`.
+/// Supports both Relaxed PHYLIP (whitespace-delimited) and Strict 10-character PHYLIP
+/// (even when the 10-character taxon name immediately abuts nucleotide position 1).
+fn split_phylip_named_line(raw_line: &str, expected_nchar: usize) -> Option<(String, String)> {
+    let line = raw_line.trim_end_matches(&['\r', '\n'][..]);
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    // Check if there is whitespace separating a leading token from the rest
+    if let Some((first_tok, rest)) = trimmed.split_once(char::is_whitespace) {
+        let rest_seq: String = rest.chars().filter(|c| !c.is_whitespace()).collect();
+        // Could this be Strict 10-char PHYLIP where the 10-char name had no space at column 10,
+        // so `first_tok` absorbed the first sequence block?
+        if line.len() > 10 && first_tok.len() > 10 {
+            let strict_name = line[..10].trim();
+            let strict_seq: String = line[10..].chars().filter(|c| !c.is_whitespace()).collect();
+            let suffix_after_10 = &first_tok[10.min(first_tok.len())..];
+            if !strict_name.is_empty()
+                && !strict_seq.is_empty()
+                && suffix_after_10.chars().all(is_valid_seq_char)
+                && strict_seq.chars().all(is_valid_seq_char)
+                && (strict_seq.len() == expected_nchar || rest_seq.is_empty() || suffix_after_10.len() == 10)
+            {
+                return Some((strict_name.replace(' ', "_"), strict_seq));
+            }
+        }
+        if !rest_seq.is_empty() {
+            return Some((first_tok.to_string(), rest_seq));
         }
     }
+
+    // No whitespace separator found: try Strict 10-character fixed-width PHYLIP column split
+    if line.len() > 10 {
+        let strict_name = line[..10].trim().replace(' ', "_");
+        let strict_seq: String = line[10..].chars().filter(|c| !c.is_whitespace()).collect();
+        if !strict_name.is_empty()
+            && !strict_seq.is_empty()
+            && strict_seq.chars().all(is_valid_seq_char)
+        {
+            return Some((strict_name, strict_seq));
+        }
+    }
+    None
+}
+
+/// Parse PHYLIP alignment string (supports Strict 10-char & Relaxed, Sequential & Interleaved).
+pub fn parse_phylip_str(phylip_text: &str) -> Result<(Vec<String>, Vec<String>), String> {
+    let clean = phylip_text.trim_start_matches('\u{feff}');
+    let mut lines_iter = clean
+        .lines()
+        .map(|l| l.trim_end_matches('\r'))
+        .filter(|l| !l.trim().is_empty());
+
+    let header = lines_iter
+        .next()
+        .ok_or_else(|| "Empty PHYLIP input.".to_string())?;
+    let header_toks: Vec<&str> = header.split_whitespace().collect();
+    if header_toks.len() < 2 {
+        return Err("Invalid PHYLIP header: expected '<ntax> <nchar>'.".to_string());
+    }
+    let ntax: usize = header_toks[0]
+        .parse()
+        .map_err(|_| format!("Invalid PHYLIP ntax '{}'", header_toks[0]))?;
+    let nchar: usize = header_toks[1]
+        .parse()
+        .map_err(|_| format!("Invalid PHYLIP nchar '{}'", header_toks[1]))?;
+    if ntax == 0 || nchar == 0 {
+        return Err("PHYLIP ntax and nchar must be positive.".to_string());
+    }
+    let explicit_interleaved = header_toks
+        .get(2)
+        .map(|f| f.eq_ignore_ascii_case("I"))
+        .unwrap_or(false);
+    let explicit_sequential = header_toks
+        .get(2)
+        .map(|f| f.eq_ignore_ascii_case("S"))
+        .unwrap_or(false);
+
+    let data_lines: Vec<&str> = lines_iter.collect();
+    if data_lines.len() < ntax {
+        return Err(format!(
+            "PHYLIP header specifies {ntax} taxa, but only {} non-empty lines follow.",
+            data_lines.len()
+        ));
+    }
+
+    // Fast path: exactly 1 line per taxon
+    if data_lines.len() == ntax {
+        let mut names = Vec::with_capacity(ntax);
+        let mut seqs = Vec::with_capacity(ntax);
+        for (i, &line) in data_lines.iter().enumerate() {
+            let (nm, sq) = split_phylip_named_line(line, nchar).ok_or_else(|| {
+                format!("Failed to parse PHYLIP taxon row {} ('{}')", i + 1, line.trim())
+            })?;
+            names.push(nm);
+            seqs.push(sq);
+        }
+        return finalize_alignment(names, seqs);
+    }
+
+    // Helper closure to try Sequential PHYLIP parsing
+    let try_sequential = || -> Result<(Vec<String>, Vec<String>), String> {
+        let mut names = Vec::with_capacity(ntax);
+        let mut seqs = Vec::with_capacity(ntax);
+        let mut line_idx = 0;
+        for t in 0..ntax {
+            if line_idx >= data_lines.len() {
+                return Err(format!("Unexpected EOF at taxon {} in sequential PHYLIP", t + 1));
+            }
+            let (nm, mut sq) = split_phylip_named_line(data_lines[line_idx], nchar)
+                .ok_or_else(|| format!("Invalid taxon start line in sequential PHYLIP: '{}'", data_lines[line_idx]))?;
+            line_idx += 1;
+            while sq.len() < nchar && line_idx < data_lines.len() {
+                let cont: String = data_lines[line_idx]
+                    .chars()
+                    .filter(|c| !c.is_whitespace())
+                    .collect();
+                if !cont.chars().all(is_valid_seq_char) {
+                    return Err("Continuation line contains non-sequence characters".to_string());
+                }
+                sq.push_str(&cont);
+                line_idx += 1;
+            }
+            if sq.len() != nchar {
+                return Err(format!(
+                    "Sequential PHYLIP taxon '{nm}' length {} != expected {nchar}",
+                    sq.len()
+                ));
+            }
+            names.push(nm);
+            seqs.push(sq);
+        }
+        if line_idx != data_lines.len() {
+            return Err("Trailing unconsumed lines in sequential PHYLIP".to_string());
+        }
+        finalize_alignment(names, seqs)
+    };
+
+    // Helper closure to try Interleaved PHYLIP parsing
+    let try_interleaved = || -> Result<(Vec<String>, Vec<String>), String> {
+        let mut names = Vec::with_capacity(ntax);
+        let mut seqs = Vec::with_capacity(ntax);
+        for i in 0..ntax {
+            let (nm, sq) = split_phylip_named_line(data_lines[i], nchar)
+                .ok_or_else(|| format!("Invalid first-block line {} in interleaved PHYLIP", i + 1))?;
+            names.push(nm);
+            seqs.push(sq);
+        }
+        let first_len = seqs[0].len();
+        if first_len == 0 || seqs.iter().any(|s| s.len() != first_len) {
+            return Err("First-block sequence lengths are not uniform in interleaved PHYLIP".to_string());
+        }
+        for (idx, &line) in data_lines.iter().enumerate().skip(ntax) {
+            let t = idx % ntax;
+            let trimmed = line.trim();
+            // Support both standard interleaved lines (sequence only) and lines that repeat the taxon name
+            let chunk: String = if let Some(rest) = trimmed.strip_prefix(names[t].as_str()) {
+                if rest.starts_with(char::is_whitespace) {
+                    rest.chars().filter(|c| !c.is_whitespace()).collect()
+                } else {
+                    trimmed.chars().filter(|c| !c.is_whitespace()).collect()
+                }
+            } else {
+                trimmed.chars().filter(|c| !c.is_whitespace()).collect()
+            };
+            if chunk.is_empty() || !chunk.chars().all(is_valid_seq_char) {
+                return Err(format!("Invalid interleaved continuation line {}", idx + 1));
+            }
+            seqs[t].push_str(&chunk);
+        }
+        if seqs.iter().any(|s| s.len() != nchar) {
+            return Err("Interleaved PHYLIP sequence lengths do not match nchar".to_string());
+        }
+        finalize_alignment(names, seqs)
+    };
+
+    if explicit_sequential {
+        return try_sequential().or_else(|_| try_interleaved());
+    }
+    if explicit_interleaved {
+        return try_interleaved().or_else(|_| try_sequential());
+    }
+
+    // Auto-disambiguate Interleaved vs Multi-line Sequential:
+    // Check if line 1 (second data line) starts with a non-sequence taxon name or if interleaved succeeds cleanly
+    if let Ok(res) = try_interleaved() {
+        return Ok(res);
+    }
+    try_sequential()
+}
+
+/// Strip NEXUS `[...]` comments (supporting nested brackets) while preserving quotes and line breaks.
+fn strip_nexus_comments(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut depth = 0usize;
+    let mut in_single_quote = false;
+    let mut in_double_quote = false;
+
+    for ch in input.chars() {
+        if depth > 0 {
+            if ch == '[' {
+                depth += 1;
+            } else if ch == ']' {
+                depth -= 1;
+            } else if ch == '\n' {
+                out.push('\n');
+            }
+            continue;
+        }
+        if ch == '\'' && !in_double_quote {
+            in_single_quote = !in_single_quote;
+            out.push(ch);
+        } else if ch == '"' && !in_single_quote {
+            in_double_quote = !in_double_quote;
+            out.push(ch);
+        } else if ch == '[' && !in_single_quote && !in_double_quote {
+            depth = 1;
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+/// Parse a NEXUS alignment line into `(taxon_name, sequence_chunk)`.
+fn parse_nexus_matrix_line(trimmed: &str) -> Option<(String, String)> {
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Some(rest) = trimmed.strip_prefix('\'') {
+        if let Some(end_q) = rest.find('\'') {
+            let name = rest[..end_q].trim().replace(' ', "_");
+            let seq: String = rest[end_q + 1..]
+                .chars()
+                .filter(|c| !c.is_whitespace())
+                .collect();
+            return Some((name, seq));
+        }
+    }
+    if let Some(rest) = trimmed.strip_prefix('"') {
+        if let Some(end_q) = rest.find('"') {
+            let name = rest[..end_q].trim().replace(' ', "_");
+            let seq: String = rest[end_q + 1..]
+                .chars()
+                .filter(|c| !c.is_whitespace())
+                .collect();
+            return Some((name, seq));
+        }
+    }
+    let (first_tok, rest) = trimmed.split_once(char::is_whitespace)?;
+    let seq: String = rest.chars().filter(|c| !c.is_whitespace()).collect();
+    if seq.is_empty() {
+        return None;
+    }
+    Some((first_tok.to_string(), seq))
+}
+
+/// Extract the value of a NEXUS `KEY=VALUE` token (case-insensitive) from header text.
+fn extract_nexus_int_param(header_upper: &str, key: &str) -> Option<usize> {
+    let idx = header_upper.find(key)?;
+    let after = header_upper[idx + key.len()..].trim_start();
+    let after_eq = after.strip_prefix('=')?.trim_start();
+    let digits: String = after_eq
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    digits.parse().ok()
+}
+
+/// Parse NEXUS alignment string (supports `DATA` and `CHARACTERS` blocks, sequential & interleaved,
+/// `[...]` comments, quoted taxon names, and `.` matchchar).
+pub fn parse_nexus_str(nexus_text: &str) -> Result<(Vec<String>, Vec<String>), String> {
+    let stripped = strip_nexus_comments(nexus_text.trim_start_matches('\u{feff}'));
+    let upper = stripped.to_ascii_uppercase();
+
+    // Find MATRIX keyword bounded by whitespace/newline/semicolon
+    let mut matrix_body_start = None;
+    let mut header_end = 0;
+    let mut search_from = 0;
+    while let Some(pos) = upper[search_from..].find("MATRIX") {
+        let abs_pos = search_from + pos;
+        let before_ok = abs_pos == 0
+            || stripped.as_bytes()[abs_pos - 1].is_ascii_whitespace()
+            || stripped.as_bytes()[abs_pos - 1] == b';';
+        let after_pos = abs_pos + 6;
+        let after_ok = after_pos >= stripped.len()
+            || stripped.as_bytes()[after_pos].is_ascii_whitespace();
+        if before_ok && after_ok {
+            header_end = abs_pos;
+            matrix_body_start = Some(after_pos);
+            break;
+        }
+        search_from = after_pos;
+    }
+
+    let start_idx = matrix_body_start
+        .ok_or_else(|| "No MATRIX block found in NEXUS input.".to_string())?;
+    let header_upper = &upper[..header_end];
+    let expected_ntax = extract_nexus_int_param(header_upper, "NTAX");
+    let expected_nchar = extract_nexus_int_param(header_upper, "NCHAR");
+
+    // Extract matrix body up to the first unquoted ';'
+    let after_matrix = &stripped[start_idx..];
+    let mut end_rel = after_matrix.len();
+    let mut in_sq = false;
+    let mut in_dq = false;
+    for (idx, ch) in after_matrix.char_indices() {
+        if ch == '\'' && !in_dq {
+            in_sq = !in_sq;
+        } else if ch == '"' && !in_sq {
+            in_dq = !in_dq;
+        } else if ch == ';' && !in_sq && !in_dq {
+            end_rel = idx;
+            break;
+        }
+    }
+    let matrix_body = &after_matrix[..end_rel];
+
+    let mut names: Vec<String> = Vec::new();
+    let mut seqs: Vec<String> = Vec::new();
+    let mut name_to_idx: HashMap<String, usize> = HashMap::new();
+
+    for raw_line in matrix_body.lines() {
+        let trimmed = raw_line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        // Check if this is an unnamed sequence continuation line for the current taxon
+        // in a multi-line sequential NEXUS matrix
+        if let Some(last_idx) = seqs.len().checked_sub(1) {
+            let need_more = expected_nchar
+                .map(|nc| seqs[last_idx].len() < nc)
+                .unwrap_or(false);
+            let first_tok = trimmed.split_whitespace().next().unwrap_or("");
+            let is_known_taxon = name_to_idx.contains_key(first_tok);
+            let all_taxa_seen = expected_ntax
+                .map(|nt| names.len() >= nt)
+                .unwrap_or(false);
+            let line_only_seq_chars = trimmed
+                .chars()
+                .all(|c| c.is_whitespace() || is_valid_seq_char(c));
+
+            if need_more && !is_known_taxon && line_only_seq_chars && (all_taxa_seen || !trimmed.contains(char::is_whitespace)) {
+                let cont: String = trimmed.chars().filter(|c| !c.is_whitespace()).collect();
+                seqs[last_idx].push_str(&cont);
+                continue;
+            }
+        }
+
+        if let Some((name, seq_chunk)) = parse_nexus_matrix_line(trimmed) {
+            if let Some(&idx) = name_to_idx.get(&name) {
+                seqs[idx].push_str(&seq_chunk);
+            } else {
+                let idx = names.len();
+                name_to_idx.insert(name.clone(), idx);
+                names.push(name);
+                seqs.push(seq_chunk);
+            }
+        } else if let Some(last_idx) = seqs.len().checked_sub(1) {
+            // Single-token continuation line
+            let cont: String = trimmed.chars().filter(|c| !c.is_whitespace()).collect();
+            if !cont.is_empty() && cont.chars().all(is_valid_seq_char) {
+                seqs[last_idx].push_str(&cont);
+            }
+        }
+    }
+
+    if names.is_empty() {
+        return Err("No sequence records found in NEXUS MATRIX block.".to_string());
+    }
+    finalize_alignment(names, seqs)
+}
+
+/// Auto-detect and parse an alignment string in **FASTA**, **PHYLIP** (strict/relaxed,
+/// sequential/interleaved), or **NEXUS** format, returning `(names, seqs, format_name)`.
+pub fn parse_alignment_str_with_format(
+    text: &str,
+) -> Result<(Vec<String>, Vec<String>, &'static str), String> {
+    let fmt = detect_alignment_format(text);
+    match fmt {
+        "NEXUS" => {
+            let (n, s) = parse_nexus_str(text)?;
+            Ok((n, s, "NEXUS"))
+        }
+        "PHYLIP" => {
+            let (n, s) = parse_phylip_str(text)?;
+            Ok((n, s, "PHYLIP"))
+        }
+        _ => {
+            let (n, s) = parse_fasta_only_str(text)?;
+            Ok((n, s, "FASTA"))
+        }
+    }
+}
+
+/// Auto-detect and parse an alignment string in **FASTA**, **PHYLIP**, or **NEXUS** format.
+pub fn parse_alignment_str(text: &str) -> Result<(Vec<String>, Vec<String>), String> {
+    let (names, seqs, _) = parse_alignment_str_with_format(text)?;
     Ok((names, seqs))
 }
 
-pub fn parse_fasta_file<P: AsRef<Path>>(path: P) -> Result<(Vec<String>, Vec<String>), String> {
-    let file = File::open(path.as_ref()).map_err(|e| format!("Failed to open FASTA: {e}"))?;
+/// Backwards-compatible alias that auto-detects **FASTA**, **PHYLIP**, or **NEXUS** input.
+pub fn parse_fasta_str(text: &str) -> Result<(Vec<String>, Vec<String>), String> {
+    parse_alignment_str(text)
+}
+
+/// Auto-detect and parse an alignment file in **FASTA**, **PHYLIP**, or **NEXUS** format.
+pub fn parse_alignment_file<P: AsRef<Path>>(path: P) -> Result<(Vec<String>, Vec<String>), String> {
+    let file = File::open(path.as_ref())
+        .map_err(|e| format!("Failed to open alignment file: {e}"))?;
     let mut reader = BufReader::new(file);
     let mut buf = String::new();
     use std::io::Read;
     reader
         .read_to_string(&mut buf)
         .map_err(|e| format!("Read error: {e}"))?;
-    parse_fasta_str(&buf)
+    parse_alignment_str(&buf)
+}
+
+/// Backwards-compatible alias that auto-detects **FASTA**, **PHYLIP**, or **NEXUS** files.
+pub fn parse_fasta_file<P: AsRef<Path>>(path: P) -> Result<(Vec<String>, Vec<String>), String> {
+    parse_alignment_file(path)
 }
 
 /// Encode N aligned nucleotide sequences of length L into flat row-major arrays:
@@ -4092,6 +4599,91 @@ mod tests {
         let res = engine.infer(&names, &seqs).unwrap();
         assert_eq!(res.n_internal_branches, 1);
         assert!(res.backbone_tree_nats < res.star_tree_nats);
+    }
+
+    #[test]
+    fn test_phylip_and_nexus_parsers_match_fasta() {
+        let fasta = "\
+>Taxon_A1
+ACGTACGTACGTACGTACGT
+>Taxon_A2
+ACGTACGTACGTACGTACGA
+>Taxon_B1
+TGCATGCATGCATGCATGCA
+>Taxon_B2
+TGCATGCATGCATGCATGCT
+";
+        // 1. Relaxed Sequential PHYLIP
+        let phylip_relaxed = "\
+4 20
+Taxon_A1   ACGTACGTACGTACGTACGT
+Taxon_A2   ACGTACGTACGTACGTACGA
+Taxon_B1   TGCATGCATGCATGCATGCA
+Taxon_B2   TGCATGCATGCATGCATGCT
+";
+        // 2. Strict 10-char Sequential PHYLIP (no space after 10-char name on row 1, plus '.' matchchar)
+        let phylip_strict = "\
+ 4 20
+Taxon_A1  ACGTACGTACGTACGTACGT
+Taxon_A2  ...................A
+Taxon_B1  TGCATGCATGCATGCATGCA
+Taxon_B2  TGCATGCATGCATGCATGCT
+";
+        // 3. Interleaved PHYLIP (2 blocks of 10 bp)
+        let phylip_interleaved = "\
+4 20
+Taxon_A1   ACGTACGTAC
+Taxon_A2   ACGTACGTAC
+Taxon_B1   TGCATGCATG
+Taxon_B2   TGCATGCATG
+
+           GTACGTACGT
+           GTACGTACGA
+           CATGCATGCA
+           CATGCATGCT
+";
+        // 4. NEXUS Interleaved with comments, quoted names, and '.' matchchar
+        let nexus_interleaved = "\
+#NEXUS
+[ multi-line comment [with nested brackets] ]
+BEGIN DATA;
+  DIMENSIONS NTAX=4 NCHAR=20;
+  FORMAT DATATYPE=DNA INTERLEAVE=YES GAP=- MISSING=? MATCHCHAR=.;
+  MATRIX
+    'Taxon A1'  ACGTACGTAC [block 1]
+    'Taxon A2'  ..........
+    Taxon_B1    TGCATGCATG
+    Taxon_B2    TGCATGCATG
+
+    'Taxon A1'  GTACGTACGT [block 2]
+    'Taxon A2'  .........A
+    Taxon_B1    CATGCATGCA
+    Taxon_B2    CATGCATGCT
+  ;
+END;
+";
+
+        let (nf, sf, fmt_f) = parse_alignment_str_with_format(fasta).unwrap();
+        let (np1, sp1, fmt_p1) = parse_alignment_str_with_format(phylip_relaxed).unwrap();
+        let (np2, sp2, fmt_p2) = parse_alignment_str_with_format(phylip_strict).unwrap();
+        let (np3, sp3, fmt_p3) = parse_alignment_str_with_format(phylip_interleaved).unwrap();
+        let (nn, sn, fmt_n) = parse_alignment_str_with_format(nexus_interleaved).unwrap();
+
+        assert_eq!(fmt_f, "FASTA");
+        assert_eq!(fmt_p1, "PHYLIP");
+        assert_eq!(fmt_p2, "PHYLIP");
+        assert_eq!(fmt_p3, "PHYLIP");
+        assert_eq!(fmt_n, "NEXUS");
+
+        assert_eq!(nf, np1);
+        assert_eq!(nf, np2);
+        assert_eq!(nf, np3);
+        assert_eq!(nf, nn);
+
+        assert_eq!(sf, sp1);
+        assert_eq!(sf, sp2);
+        assert_eq!(sf, sp3);
+        assert_eq!(sf, sn);
     }
 }
 

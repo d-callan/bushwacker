@@ -782,17 +782,17 @@
     <div class="grid-layout" id="mainGrid">
       <!-- LEFT CONTROL PANEL -->
       <div class="left-sidebar">
-        <!-- MODE A: FASTA ALIGNMENT INDUCTION -->
+        <!-- MODE A: FASTA / PHYLIP / NEXUS ALIGNMENT INDUCTION -->
         <div class="panel" id="panelInduceInput">
           <div class="panel-title">
-            <span class="panel-title-label">1. Input Alignment (FASTA)</span>
+            <span class="panel-title-label">1. Input Alignment (FASTA / PHYLIP / NEXUS)</span>
             <span style="font-family:var(--font-mono);font-size:10.5px;color:var(--text-tertiary);" id="alignMetaBadge">Ready</span>
           </div>
 
           <div class="dropzone" id="fastaDropzone" onclick="document.getElementById('fastaFileInput').click()">
-            <strong>Drop FASTA alignment here</strong> or click to browse<br>
-            <span style="font-size:11px;color:var(--text-tertiary);">Nucleotide or coding sequences (.fasta, .fa, .fna)</span>
-            <input type="file" id="fastaFileInput" accept=".fa,.fasta,.fna,.txt" style="display:none" onchange="handleFastaFile(event)">
+            <strong>Drop FASTA, PHYLIP, or NEXUS alignment here</strong> or click to browse<br>
+            <span style="font-size:11px;color:var(--text-tertiary);">Auto-detects .fasta, .fa, .phy, .phylip (strict/relaxed/interleaved), .nex, .nexus</span>
+            <input type="file" id="fastaFileInput" accept=".fa,.fasta,.fna,.phy,.phylip,.nex,.nexus,.nxs,.txt" style="display:none" onchange="handleFastaFile(event)">
           </div>
 
           <div style="font-size:10.5px;font-weight:700;color:var(--text-secondary);margin-bottom:5px;text-transform:uppercase;">
@@ -806,7 +806,7 @@
             <button class="preset-btn" id="preset_large512" onclick="loadFastaPreset('large512')">Large Radiation Stress (N=512)</button>
           </div>
 
-          <textarea id="fastaInput" spellcheck="false" placeholder=">Taxon_1&#10;ATGGGT..."></textarea>
+          <textarea id="fastaInput" spellcheck="false" placeholder="Paste FASTA (>Taxon), PHYLIP (N L), or NEXUS (#NEXUS) alignment..."></textarea>
 
           <div class="panel-title" style="margin-top:4px;">
             <span class="panel-title-label">2. MDL Induction Parameters</span>
@@ -841,16 +841,16 @@
           <button class="run-btn" id="runInduceBtn" onclick="runFastaInduction()">Induce MDL Graph (Rust WASM)</button>
         </div>
 
-        <!-- MODE B: DIRECT NEWICK BIG-TREE EXPLORER -->
+        <!-- MODE B: DIRECT NEWICK / NEXUS BIG-TREE EXPLORER -->
         <div class="panel hidden" id="panelNewickInput">
           <div class="panel-title">
-            <span class="panel-title-label">1. Direct Newick Tree Explorer</span>
+            <span class="panel-title-label">1. Direct Newick / NEXUS Tree Explorer</span>
           </div>
 
           <div class="dropzone" onclick="document.getElementById('nwkFileInput').click()">
-            <strong>Drop Newick (.nwk / .treefile) here</strong> or click to browse<br>
+            <strong>Drop Newick (.nwk / .treefile) or NEXUS (.nex / .trees) here</strong> or click to browse<br>
             <span style="font-size:11px;color:var(--text-tertiary);">Supports 10 to 50,000+ tips with zero-length polytomy audit</span>
-            <input type="file" id="nwkFileInput" accept=".nwk,.tree,.treefile,.newick,.txt" style="display:none" onchange="handleNewickFile(event)">
+            <input type="file" id="nwkFileInput" accept=".nwk,.tree,.treefile,.newick,.nex,.nexus,.tre,.trees,.txt" style="display:none" onchange="handleNewickFile(event)">
           </div>
 
           <div style="font-size:10.5px;font-weight:700;color:var(--text-secondary);margin-bottom:5px;text-transform:uppercase;">
@@ -1427,6 +1427,26 @@
       runFastaInduction();
     };
 
+    function detectAlignmentFormatJS(text) {
+      const lines = text.replace(/^\uFEFF/, '').split(/\r?\n/);
+      for (const raw of lines) {
+        const t = raw.trim();
+        if (!t || t.startsWith(';')) continue;
+        const up = t.toUpperCase();
+        if (up.startsWith('#NEXUS') || up.startsWith('BEGIN DATA') || up.startsWith('BEGIN CHARACTERS') || up.startsWith('BEGIN TAXA')) {
+          return 'NEXUS';
+        }
+        if (t.startsWith('>')) return 'FASTA';
+        const toks = t.split(/\s+/);
+        if (toks.length >= 2 && /^\d+$/.test(toks[0]) && /^\d+$/.test(toks[1])) {
+          return 'PHYLIP';
+        }
+        break;
+      }
+      if (/BEGIN\s+(DATA|CHARACTERS)/i.test(text)) return 'NEXUS';
+      return 'FASTA';
+    }
+
     // -----------------------------------------------------------------------
     // 3. Execute Rust WASM MDL Induction
     // -----------------------------------------------------------------------
@@ -1435,13 +1455,14 @@
       const fasta = document.getElementById('fastaInput').value.trim();
       if (!fasta) return;
 
+      const detectedFmt = detectAlignmentFormatJS(fasta);
       const coding = document.getElementById('paramCoding').checked;
       const shunts = document.getElementById('paramShunts').checked;
       const minShunt = parseInt(document.getElementById('paramMinShunt').value, 10) || 2;
 
       const btn = document.getElementById('runInduceBtn');
       btn.disabled = true;
-      btn.textContent = 'Inducing MDL Graph...';
+      btn.textContent = `Inducing MDL Graph (${detectedFmt})...`;
 
       setTimeout(() => {
         try {
@@ -1451,7 +1472,8 @@
 
           currentResult = JSON.parse(jsonStr);
           currentResult.runtime_ms = elapsedMs;
-          document.getElementById('alignMetaBadge').textContent = `N=${currentResult.n_taxa}, L=${currentResult.n_sites}`;
+          currentResult.input_format = detectedFmt;
+          document.getElementById('alignMetaBadge').textContent = `${detectedFmt} • N=${currentResult.n_taxa}, L=${currentResult.n_sites}`;
           document.getElementById('newickInput').value = currentResult.newick;
 
           buildTreeFromBushwhackerResult(currentResult);
@@ -1634,10 +1656,56 @@
     };
 
     // -----------------------------------------------------------------------
-    // 5. Direct Newick Parser & Big-Tree Generator (Tab 2)
+    // 5. Direct Newick / NEXUS Tree Parser & Big-Tree Generator (Tab 2)
     // -----------------------------------------------------------------------
+    function extractNewickAndTranslateFromInput(rawInput) {
+      let text = rawInput.trim();
+      const translateMap = new Map();
+
+      // Check if input is a NEXUS file (#NEXUS or BEGIN TREES)
+      if (/^#NEXUS/i.test(text) || /BEGIN\s+TREES/i.test(text)) {
+        // Strip NEXUS [...] comments
+        let clean = '';
+        let depth = 0;
+        let inSQ = false;
+        for (let i = 0; i < text.length; i++) {
+          const c = text[i];
+          if (depth > 0) {
+            if (c === '[') depth++;
+            else if (c === ']') depth--;
+            continue;
+          }
+          if (c === "'") { inSQ = !inSQ; clean += c; }
+          else if (c === '[' && !inSQ) { depth = 1; }
+          else { clean += c; }
+        }
+
+        // Parse optional TRANSLATE block: TRANSLATE id1 label1, id2 label2, ... ;
+        const transMatch = clean.match(/TRANSLATE\s+([\s\S]*?);/i);
+        if (transMatch) {
+          const entries = transMatch[1].split(',');
+          for (const ent of entries) {
+            const m = ent.trim().match(/^(\S+)\s+(.+)$/);
+            if (m) {
+              const key = m[1].replace(/^['"]|['"]$/g, '');
+              const val = m[2].trim().replace(/^['"]|['"]$/g, '').replace(/\s+/g, '_');
+              translateMap.set(key, val);
+            }
+          }
+        }
+
+        // Extract first TREE statement: TREE [ * ] name = ( ... ) ;
+        const treeMatch = clean.match(/UTREE|TREE\s+[^=]*=\s*(\([\s\S]*?\))\s*;/i);
+        if (treeMatch && treeMatch[1]) {
+          text = treeMatch[1];
+        }
+      }
+
+      return { newickText: text.replace(/;\s*$/, ''), translateMap };
+    }
+
     function parseNewickToTree(nwkStr, zeroEps = 1e-5) {
-      const s = nwkStr.trim().replace(/;\s*$/, '');
+      const { newickText: s, translateMap } = extractNewickAndTranslateFromInput(nwkStr);
       let pos = 0;
       let nextId = 100000;
 
@@ -1694,7 +1762,8 @@
 
         if (node.children.length === 0) {
           node.isLeaf = true;
-          node.rawLabel = token || `Tip_${nextId}`;
+          const mapped = translateMap.get(token) || token;
+          node.rawLabel = mapped || `Tip_${nextId}`;
         } else {
           const sup = parseFloat(token);
           if (isFinite(sup)) {
