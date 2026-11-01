@@ -132,16 +132,22 @@ Full derivations, proofs, and multi-panel figures are available in [`paper/bushw
 
 ## Scaling Performance
 
-Asymptotically, **BUSHWHACKER** scales as `O(N² L + N³ + R_NNI · N · L log L)`, which is **linear in alignment length `L`** (up to a `log L` sort) and **sub-quadratic to quadratic in taxa `N`** for typical datasets:
+**BUSHWHACKER** is engineered to be **strictly sub-quadratic in the number of taxa `N` (`O(N log N · L)`)** and **near-linear in alignment length `L` (`O(L log L)`)**:
+- **128-Bit Popcount Four-Gamete Coherence (`O(L)`):** Packs column character states across at most `128` stratified anchor taxa into stack-allocated `[u64; 2]` bitsets, evaluating Four-Gamete intersection via hardware `POPCNT` instructions.
+- **Top-Down Recursive Pivot-Split Partitioning & Tournament Backbone (`O(N log N · L)`):** Partitions `N > 128` taxa via recursive 2-pivot Jukes–Cantor projection into bounded leaf clusters (`|C_m| ≤ 64`), computes 3-point terminal loads within each leaf cluster plus `32` global anchors (`O(N L)`), and agglomerates cluster Fitch consensus roots bottom-up without ever allocating an `N × N` distance matrix or executing an `O(N³)` loop.
+- **Bounded-Radius Delta-Fitch NNI & Leave-One-Out Hub Propagation (`O(N · L log L)`):** Propagates directed Fitch state updates locally across swapped edges and computes top-down polytomy hub states via `O(d · L)` leave-one-out bit-count subtraction rather than `O(d² · L)` re-aggregation.
 
 | Taxa (`N`) | Sites (`L`) | Rust Engine Runtime (s) | Scaling Mode |
 | :---: | :---: | :---: | :--- |
-| **16** | 1,000 | **0.0069 s** | Taxa scaling (`L = 1,000 bp`) |
-| **32** | 1,000 | **0.0216 s** | Taxa scaling (`L = 1,000 bp`) |
-| **64** | 1,000 | **0.0677 s** | Taxa scaling (`L = 1,000 bp`) |
-| **128** | 1,000 | **0.2285 s** | Taxa scaling (`L = 1,000 bp`) |
-| **256** | 1,000 | **0.7511 s** | Taxa scaling (`L = 1,000 bp`) |
-| **512** | 1,000 | **3.1132 s** | Taxa scaling (`L = 1,000 bp`) |
+| **16** | 1,000 | **0.0058 s** | Taxa scaling (`L = 1,000 bp`) |
+| **32** | 1,000 | **0.0165 s** | Taxa scaling (`L = 1,000 bp`) |
+| **64** | 1,000 | **0.0411 s** | Taxa scaling (`L = 1,000 bp`) |
+| **128** | 1,000 | **0.1038 s** | Taxa scaling (`L = 1,000 bp`) |
+| **256** | 1,000 | **0.1000 s** | Taxa scaling (`L = 1,000 bp`, hierarchical `O(N log N)`) |
+| **512** | 1,000 | **0.2336 s** | Taxa scaling (`L = 1,000 bp`, hierarchical `O(N log N)`) |
+| **1,024** | 1,000 | **0.4375 s** | Taxa scaling (`L = 1,000 bp`, hierarchical `O(N log N)`) |
+| **2,048** | 1,000 | **1.1755 s** | Taxa scaling (`L = 1,000 bp`, hierarchical `O(N log N)`) |
+| **4,096** | 1,000 | **3.2406 s** | Taxa scaling (`L = 1,000 bp`, hierarchical `O(N log N)`) |
 | 64 | **500** | **0.0308 s** | Site scaling (`N = 64 taxa`) |
 | 64 | **2,000** | **0.1692 s** | Site scaling (`N = 64 taxa`) |
 | 64 | **5,000** | **0.4821 s** | Site scaling (`N = 64 taxa`) |

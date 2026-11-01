@@ -407,17 +407,12 @@ impl BushwhackerEngine {
         dist_weights = dw_mod;
         tree_weights = tw_mod;
 
-        // Step 1: Pairwise JC matrices & 3-point terminal loads
-        let jc_mut_mat = self.compute_pairwise_jc_matrix(&mat, n, l, &dist_weights, l_eff);
-        let uw_jc_mat = self.compute_pairwise_jc_matrix(&mat, n, l, &vec![1.0; l], l_eff);
-        let terminal_loads = self.estimate_three_point_terminal_loads(&uw_jc_mat, n);
-
-        // Step 2: Candidate backbone + Multi-Hop Split-Attractor Refinement
-        let (mut adj, node_labels) = self.build_mdl_candidate_backbone(
+        // Step 1 & 2: Sub-quadratic O(N log N * L) 3-point terminal loads & candidate backbone
+        let (terminal_loads, mut adj, node_labels) = self.build_subquadratic_loads_and_backbone(
             names,
+            &mat,
             &bitmasks,
-            &jc_mut_mat,
-            &terminal_loads,
+            &dist_weights,
             &tree_weights,
             n,
             l,
@@ -625,9 +620,16 @@ impl BushwhackerEngine {
             }
         }
 
-        // Extract parsimony-informative column-state vectors
-        let mut char_vecs: Vec<Vec<u8>> = Vec::new();
-        let mut char_bar: Vec<Vec<u8>> = Vec::new();
+        // Extract parsimony-informative column-state vectors packed into 128-bit [u64; 2] words
+        let k_coh = n.min(128);
+        let coh_taxa: Vec<usize> = if n <= 128 {
+            (0..n).collect()
+        } else {
+            (0..k_coh).map(|i| (i * (n - 1)) / (k_coh - 1)).collect()
+        };
+
+        let mut char_vecs: Vec<[u64; 2]> = Vec::new();
+        let mut char_bar: Vec<[u64; 2]> = Vec::new();
         let mut char_sites: Vec<usize> = Vec::new();
         let mut char_counts: Vec<usize> = Vec::new();
 
@@ -636,8 +638,8 @@ impl BushwhackerEngine {
                 continue;
             }
             let mut n_val = 0usize;
-            for i in 0..n {
-                if mat[i * l + s] >= 0 {
+            for &ti in &coh_taxa {
+                if mat[ti * l + s] >= 0 {
                     n_val += 1;
                 }
             }
@@ -646,24 +648,26 @@ impl BushwhackerEngine {
             }
             for b in 0..4_i8 {
                 let mut cnt = 0usize;
-                for i in 0..n {
-                    if mat[i * l + s] == b {
+                for &ti in &coh_taxa {
+                    if mat[ti * l + s] == b {
                         cnt += 1;
                     }
                 }
                 if cnt >= 2 && cnt <= n_val / 2 {
-                    let mut c_vec = vec![0_u8; n];
-                    let mut cb_vec = vec![0_u8; n];
-                    for i in 0..n {
-                        let v = mat[i * l + s];
+                    let mut c_bits = [0_u64; 2];
+                    let mut cb_bits = [0_u64; 2];
+                    for (idx_t, &ti) in coh_taxa.iter().enumerate() {
+                        let v = mat[ti * l + s];
+                        let word = idx_t >> 6;
+                        let bit = 1_u64 << (idx_t & 63);
                         if v == b {
-                            c_vec[i] = 1;
+                            c_bits[word] |= bit;
                         } else if v >= 0 {
-                            cb_vec[i] = 1;
+                            cb_bits[word] |= bit;
                         }
                     }
-                    char_vecs.push(c_vec);
-                    char_bar.push(cb_vec);
+                    char_vecs.push(c_bits);
+                    char_bar.push(cb_bits);
                     char_sites.push(s);
                     char_counts.push(cnt);
                 }
@@ -689,7 +693,7 @@ impl BushwhackerEngine {
         if m_chars > 350 {
             ref_idx.sort_by_key(|&idx| {
                 let c = char_counts[idx];
-                let bal = c.min(n.saturating_sub(c));
+                let bal = c.min(k_coh.saturating_sub(c));
                 (std::cmp::Reverse(bal), idx)
             });
             ref_idx.truncate(350);
@@ -699,8 +703,8 @@ impl BushwhackerEngine {
         let mut coh_scores = vec![1.0_f64; m_chars];
 
         for k in 0..m_chars {
-            let ck = &char_vecs[k];
-            let cbk = &char_bar[k];
+            let ck = char_vecs[k];
+            let cbk = char_bar[k];
             let sk = char_sites[k];
             let mut sum_overlap = 0.0_f64;
             let mut cnt_overlap = 0usize;
@@ -712,22 +716,13 @@ impl BushwhackerEngine {
                 if sk.abs_diff(sr) <= delta_local {
                     continue;
                 }
-                let cr = &char_vecs[r];
-                let cbr = &char_bar[r];
-                let mut q11 = 0u32;
-                let mut q10 = 0u32;
-                let mut q01 = 0u32;
-                let mut q00 = 0u32;
-                for i in 0..n {
-                    let a = ck[i];
-                    let ab = cbk[i];
-                    let b = cr[i];
-                    let bb = cbr[i];
-                    q11 += (a & b) as u32;
-                    q10 += (a & bb) as u32;
-                    q01 += (ab & b) as u32;
-                    q00 += (ab & bb) as u32;
-                }
+                let cr = char_vecs[r];
+                let cbr = char_bar[r];
+                let q11 = (ck[0] & cr[0]).count_ones() + (ck[1] & cr[1]).count_ones();
+                let q10 = (ck[0] & cbr[0]).count_ones() + (ck[1] & cbr[1]).count_ones();
+                let q01 = (cbk[0] & cr[0]).count_ones() + (cbk[1] & cr[1]).count_ones();
+                let q00 = (cbk[0] & cbr[0]).count_ones() + (cbk[1] & cbr[1]).count_ones();
+
                 let viol = q11.min(q10).min(q01.min(q00)) as f64;
                 let compat = (-1.1 * viol).exp();
                 sum_long += compat;
@@ -799,194 +794,189 @@ impl BushwhackerEngine {
         (mod_dist, mod_tree)
     }
 
-    fn compute_pairwise_jc_matrix(
-        &self,
-        mat: &[i8],
-        n: usize,
-        l: usize,
+    #[inline]
+    fn compute_pair_jc_dist(
+        row_i: &[i8],
+        row_j: &[i8],
         site_weights: &[f64],
         l_eff: f64,
-    ) -> Vec<f64> {
-        let mut jc_mat = vec![0.0_f64; n * n];
-        for i in 0..n {
-            let row_i = &mat[i * l..(i + 1) * l];
-            for j in (i + 1)..n {
-                let row_j = &mat[j * l..(j + 1) * l];
-                let mut w_valid = 0.0_f64;
-                let mut w_diffs = 0.0_f64;
-                for s in 0..l {
-                    let bi = row_i[s];
-                    let bj = row_j[s];
-                    if bi >= 0 && bj >= 0 {
-                        let w = site_weights[s];
-                        w_valid += w;
-                        if bi != bj {
-                            w_diffs += w;
-                        }
-                    }
+    ) -> f64 {
+        let mut w_valid = 0.0_f64;
+        let mut w_diffs = 0.0_f64;
+        for s in 0..row_i.len() {
+            let bi = row_i[s];
+            let bj = row_j[s];
+            if bi >= 0 && bj >= 0 {
+                let w = site_weights[s];
+                w_valid += w;
+                if bi != bj {
+                    w_diffs += w;
                 }
-                let p_hat = (w_diffs / w_valid.max(1.0)).clamp(0.0, 0.745);
-                let jc_d = -0.75 * (1.0 - (4.0 / 3.0) * p_hat).ln();
-                let val = jc_d * l_eff;
-                jc_mat[i * n + j] = val;
-                jc_mat[j * n + i] = val;
             }
         }
-        jc_mat
+        let p_hat = (w_diffs / w_valid.max(1.0)).clamp(0.0, 0.745);
+        -0.75 * (1.0 - (4.0 / 3.0) * p_hat).ln() * l_eff
     }
 
-    fn estimate_three_point_terminal_loads(&self, mut_mat: &[f64], n: usize) -> Vec<f64> {
-        if n <= 2 {
-            let mut out = vec![0.5; n];
-            if n == 2 {
-                let v = (mut_mat[1] * 0.5).max(0.5);
-                out[0] = v;
-                out[1] = v;
-            }
-            return out;
-        }
-        let mut loads = vec![0.0_f64; n];
-        for i in 0..n {
-            let mut j_near = if i == 0 { 1 } else { 0 };
-            let mut d_min = mut_mat[i * n + j_near];
-            for j in 0..n {
-                if j != i && mut_mat[i * n + j] < d_min {
-                    d_min = mut_mat[i * n + j];
-                    j_near = j;
+    #[inline]
+    fn compute_pair_unweighted_jc_dist(row_i: &[i8], row_j: &[i8], l_eff: f64) -> f64 {
+        let mut n_valid = 0usize;
+        let mut n_diffs = 0usize;
+        for s in 0..row_i.len() {
+            let bi = row_i[s];
+            let bj = row_j[s];
+            if bi >= 0 && bj >= 0 {
+                n_valid += 1;
+                if bi != bj {
+                    n_diffs += 1;
                 }
             }
-            let mut deltas: Vec<f64> = (0..n)
-                .filter(|&k| k != i && k != j_near)
-                .map(|k| mut_mat[i * n + k] - mut_mat[j_near * n + k])
-                .collect();
-            let med = median_f64(&mut deltas);
-            let m_i = 0.5 * (d_min + med);
-            loads[i] = m_i.clamp(0.4, d_min.max(0.8));
         }
-        loads
+        let p_hat = ((n_diffs as f64) / (n_valid.max(1) as f64)).clamp(0.0, 0.745);
+        -0.75 * (1.0 - (4.0 / 3.0) * p_hat).ln() * l_eff
+    }
+
+    fn partition_items_recursive(
+        items: Vec<usize>,
+        seqs: &HashMap<usize, Vec<i8>>,
+        site_weights: &[f64],
+        l_eff: f64,
+        max_cluster_size: usize,
+        out_clusters: &mut Vec<Vec<usize>>,
+    ) {
+        if items.len() <= max_cluster_size {
+            out_clusters.push(items);
+            return;
+        }
+        let p0 = items[0];
+        let seq_p0 = &seqs[&p0];
+        let mut p1 = p0;
+        let mut max_d1 = -1.0_f64;
+        for &x in &items {
+            if x != p0 {
+                let d = Self::compute_pair_jc_dist(seq_p0, &seqs[&x], site_weights, l_eff);
+                if d > max_d1 {
+                    max_d1 = d;
+                    p1 = x;
+                }
+            }
+        }
+        let seq_p1 = &seqs[&p1];
+        let mut p2 = p0;
+        let mut max_d2 = -1.0_f64;
+        for &x in &items {
+            if x != p1 {
+                let d = Self::compute_pair_jc_dist(seq_p1, &seqs[&x], site_weights, l_eff);
+                if d > max_d2 {
+                    max_d2 = d;
+                    p2 = x;
+                }
+            }
+        }
+        let seq_p2 = &seqs[&p2];
+        let mut projections: Vec<(f64, usize)> = items
+            .into_iter()
+            .map(|x| {
+                let sx = &seqs[&x];
+                let d1 = Self::compute_pair_jc_dist(sx, seq_p1, site_weights, l_eff);
+                let d2 = Self::compute_pair_jc_dist(sx, seq_p2, site_weights, l_eff);
+                (d1 - d2, x)
+            })
+            .collect();
+        projections.sort_by(|a, b| {
+            a.0.partial_cmp(&b.0)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.1.cmp(&b.1))
+        });
+        let mid = projections.len() / 2;
+        let left: Vec<usize> = projections[..mid].iter().map(|x| x.1).collect();
+        let right: Vec<usize> = projections[mid..].iter().map(|x| x.1).collect();
+        Self::partition_items_recursive(left, seqs, site_weights, l_eff, max_cluster_size, out_clusters);
+        Self::partition_items_recursive(right, seqs, site_weights, l_eff, max_cluster_size, out_clusters);
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn build_mdl_candidate_backbone(
+    fn agglomerate_bounded_cluster(
         &self,
-        names: &[String],
-        bitmasks: &[u8],
-        jc_mut_mat: &[f64],
-        terminal_loads: &[f64],
+        cluster_nodes: &[usize],
+        seqs: &mut HashMap<usize, Vec<i8>>,
         site_weights: &[f64],
-        n: usize,
         l: usize,
         l_eff: f64,
-        ti_cost: f64,
-        tv_cost: f64,
-    ) -> (BTreeMap<usize, Vec<usize>>, BTreeMap<usize, String>) {
-        let mut node_labels: BTreeMap<usize, String> =
-            (0..n).map(|i| (i, names[i].clone())).collect();
-        let mut adj: BTreeMap<usize, Vec<usize>> = (0..n).map(|i| (i, Vec::new())).collect();
-
-        if n == 1 {
-            return (adj, node_labels);
+        adj: &mut BTreeMap<usize, Vec<usize>>,
+        node_labels: &mut BTreeMap<usize, String>,
+        next_node: &mut usize,
+        stop_at_one: bool,
+    ) -> usize {
+        let m = cluster_nodes.len();
+        if m == 1 {
+            return cluster_nodes[0];
         }
-        if n == 2 {
-            adj.get_mut(&0).unwrap().push(1);
-            adj.get_mut(&1).unwrap().push(0);
-            return (adj, node_labels);
-        }
-        if n == 3 {
-            let center = n;
-            adj.insert(center, vec![0, 1, 2]);
-            node_labels.insert(center, format!("N{center}"));
-            for i in 0..3 {
-                adj.get_mut(&i).unwrap().push(center);
-            }
-            return (adj, node_labels);
-        }
-        if n == 4 {
-            let t: Vec<(Vec<u8>, f64)> = (0..4)
-                .map(|i| (bitmasks[i * l..(i + 1) * l].to_vec(), terminal_loads[i]))
-                .collect();
-            let splits = [([0, 1], [2, 3]), ([0, 2], [1, 3]), ([0, 3], [1, 2])];
-            let mut best_idx = 0;
-            let mut best_gain = f64::NEG_INFINITY;
-            for (idx, (p1, p2)) in splits.iter().enumerate() {
-                let (g, _, _) = self.compute_split_mdl_gain_from_children(
-                    &[t[p1[0]].clone(), t[p1[1]].clone()],
-                    &[t[p2[0]].clone(), t[p2[1]].clone()],
-                    l,
-                    l_eff,
-                    ti_cost,
-                    tv_cost,
-                    site_weights,
-                );
-                if g > best_gain {
-                    best_gain = g;
-                    best_idx = idx;
-                }
-            }
-            if best_gain > 0.0 {
-                let (p1, p2) = splits[best_idx];
-                let (u, v) = (4, 5);
-                adj.insert(u, vec![p1[0], p1[1], v]);
-                adj.insert(v, vec![p2[0], p2[1], u]);
-                node_labels.insert(u, format!("N{u}"));
-                node_labels.insert(v, format!("N{v}"));
-                for &x in &p1 {
-                    adj.get_mut(&x).unwrap().push(u);
-                }
-                for &x in &p2 {
-                    adj.get_mut(&x).unwrap().push(v);
-                }
+        if m == 2 {
+            let u = cluster_nodes[0];
+            let v = cluster_nodes[1];
+            if stop_at_one {
+                let w = *next_node;
+                *next_node += 1;
+                adj.entry(w).or_default().extend([u, v]);
+                adj.entry(u).or_default().push(w);
+                adj.entry(v).or_default().push(w);
+                node_labels.insert(w, format!("N{w}"));
+                let su = &seqs[&u];
+                let sv = &seqs[&v];
+                let sw: Vec<i8> = (0..l)
+                    .map(|s| if su[s] >= 0 { su[s] } else { sv[s] })
+                    .collect();
+                seqs.insert(w, sw);
+                return w;
             } else {
-                let center = 4;
-                adj.insert(center, vec![0, 1, 2, 3]);
-                node_labels.insert(center, format!("N{center}"));
-                for i in 0..4 {
-                    adj.get_mut(&i).unwrap().push(center);
-                }
-            }
-            return (adj, node_labels);
-        }
-
-        let max_nodes = 2 * n;
-        let mut d_mat = vec![0.0_f64; max_nodes * max_nodes];
-        let mut v_mat = vec![0.0_f64; max_nodes * max_nodes];
-        for i in 0..n {
-            for j in 0..n {
-                let d_val = jc_mut_mat[i * n + j];
-                d_mat[i * max_nodes + j] = d_val;
-                v_mat[i * max_nodes + j] =
-                    d_val.max(0.5) * (1.0 + (d_val / l_eff.max(1.0)).powi(2));
+                adj.entry(u).or_default().push(v);
+                adj.entry(v).or_default().push(u);
+                return u;
             }
         }
 
-        let mut active: Vec<usize> = (0..n).collect();
-        let mut next_node = n;
-        for i in n..(2 * n - 2) {
-            adj.insert(i, Vec::new());
-            node_labels.insert(i, format!("N{i}"));
+        let cap = 2 * m + 2;
+        let mut d_mat = vec![0.0_f64; cap * cap];
+        let mut v_mat = vec![0.0_f64; cap * cap];
+        let mut local_to_global: Vec<usize> = cluster_nodes.to_vec();
+
+        for i in 0..m {
+            let si = &seqs[&local_to_global[i]];
+            for j in (i + 1)..m {
+                let sj = &seqs[&local_to_global[j]];
+                let d_val = Self::compute_pair_jc_dist(si, sj, site_weights, l_eff);
+                let v_val = d_val.max(0.5) * (1.0 + (d_val / l_eff.max(1.0)).powi(2));
+                d_mat[i * cap + j] = d_val;
+                d_mat[j * cap + i] = d_val;
+                v_mat[i * cap + j] = v_val;
+                v_mat[j * cap + i] = v_val;
+            }
         }
 
-        while active.len() > 3 {
+        let mut active: Vec<usize> = (0..m).collect();
+        let mut row_sums = vec![0.0_f64; cap];
+        for i in 0..m {
+            let mut s = 0.0_f64;
+            for j in 0..m {
+                s += d_mat[i * cap + j];
+            }
+            row_sums[i] = s;
+        }
+
+        let min_active = if stop_at_one { 2 } else { 3 };
+        while active.len() > min_active {
             let k = active.len();
-            let mut row_sums = vec![0.0_f64; k];
-            for a in 0..k {
-                let ua = active[a];
-                let mut s = 0.0_f64;
-                for b in 0..k {
-                    s += d_mat[ua * max_nodes + active[b]];
-                }
-                row_sums[a] = s;
-            }
-
             let mut best_q = f64::INFINITY;
             let mut best_pair = (0usize, 1usize);
+            let k_m2 = ((k as f64) - 2.0).max(1.0);
+
             for a in 0..k {
-                let ua = active[a];
+                let la = active[a];
+                let ra = row_sums[la];
                 for b in (a + 1)..k {
-                    let ub = active[b];
-                    let q_val = ((k as f64) - 2.0) * d_mat[ua * max_nodes + ub]
-                        - row_sums[a]
-                        - row_sums[b];
+                    let lb = active[b];
+                    let q_val = k_m2 * d_mat[la * cap + lb] - ra - row_sums[lb];
                     if q_val < best_q {
                         best_q = q_val;
                         best_pair = (a, b);
@@ -995,75 +985,408 @@ impl BushwhackerEngine {
             }
 
             let (a_pos, b_pos) = best_pair;
-            let u = active[a_pos];
-            let v = active[b_pos];
-            let w = next_node;
-            next_node += 1;
+            let lu = active[a_pos];
+            let lv = active[b_pos];
+            let gu = local_to_global[lu];
+            let gv = local_to_global[lv];
 
-            adj.entry(w).or_default().extend([u, v]);
-            adj.get_mut(&u).unwrap().push(w);
-            adj.get_mut(&v).unwrap().push(w);
+            let gw = *next_node;
+            *next_node += 1;
+            let lw = local_to_global.len();
+            local_to_global.push(gw);
 
-            let d_uv = d_mat[u * max_nodes + v];
-            let v_uv = v_mat[u * max_nodes + v].max(1e-6);
+            adj.entry(gw).or_default().extend([gu, gv]);
+            adj.entry(gu).or_default().push(gw);
+            adj.entry(gv).or_default().push(gw);
+            node_labels.insert(gw, format!("N{gw}"));
+
+            if stop_at_one {
+                let su = &seqs[&gu];
+                let sv = &seqs[&gv];
+                let sw: Vec<i8> = (0..l)
+                    .map(|s| if su[s] >= 0 { su[s] } else { sv[s] })
+                    .collect();
+                seqs.insert(gw, sw);
+            }
+
+            let d_uv = d_mat[lu * cap + lv];
+            let v_uv = v_mat[lu * cap + lv].max(1e-6);
             let others: Vec<usize> = active
                 .iter()
                 .copied()
-                .filter(|&x| x != u && x != v)
+                .filter(|&x| x != lu && x != lv)
                 .collect();
             let lam = if !others.is_empty() {
                 let lam_num: f64 = others
                     .iter()
-                    .map(|&x| v_mat[v * max_nodes + x] - v_mat[u * max_nodes + x])
+                    .map(|&x| v_mat[lv * cap + x] - v_mat[lu * cap + x])
                     .sum();
                 (0.5 + lam_num / (2.0 * (others.len() as f64) * v_uv)).clamp(0.05, 0.95)
             } else {
                 0.5
             };
 
-            let limb_u = (0.5 * d_uv
-                + (row_sums[a_pos] - row_sums[b_pos]) / (2.0 * ((k as f64) - 2.0)))
-                .max(0.0);
+            let limb_u = (0.5 * d_uv + (row_sums[lu] - row_sums[lv]) / (2.0 * k_m2)).max(0.0);
             let limb_v = (d_uv - limb_u).max(0.0);
 
-            for &x in &others {
-                let d_wx = (lam * (d_mat[u * max_nodes + x] - limb_u)
-                    + (1.0 - lam) * (d_mat[v * max_nodes + x] - limb_v))
-                    .max(0.0);
-                let v_wx = (lam * v_mat[u * max_nodes + x]
-                    + (1.0 - lam) * v_mat[v * max_nodes + x]
+            let mut rw_sum = 0.0_f64;
+            for &lx in &others {
+                let d_ux = d_mat[lu * cap + lx];
+                let d_vx = d_mat[lv * cap + lx];
+                let d_wx = (lam * (d_ux - limb_u) + (1.0 - lam) * (d_vx - limb_v)).max(0.0);
+                let v_wx = (lam * v_mat[lu * cap + lx]
+                    + (1.0 - lam) * v_mat[lv * cap + lx]
                     - lam * (1.0 - lam) * v_uv)
                     .max(0.25);
-                d_mat[w * max_nodes + x] = d_wx;
-                d_mat[x * max_nodes + w] = d_wx;
-                v_mat[w * max_nodes + x] = v_wx;
-                v_mat[x * max_nodes + w] = v_wx;
+                d_mat[lw * cap + lx] = d_wx;
+                d_mat[lx * cap + lw] = d_wx;
+                v_mat[lw * cap + lx] = v_wx;
+                v_mat[lx * cap + lw] = v_wx;
+                row_sums[lx] += d_wx - d_ux - d_vx;
+                rw_sum += d_wx;
+            }
+            row_sums[lw] = rw_sum;
+
+            active.retain(|&x| x != lu && x != lv);
+            active.push(lw);
+        }
+
+        if stop_at_one {
+            // Merge the final 2 active nodes into the cluster root
+            let gu = local_to_global[active[0]];
+            let gv = local_to_global[active[1]];
+            let gw = *next_node;
+            *next_node += 1;
+            adj.entry(gw).or_default().extend([gu, gv]);
+            adj.entry(gu).or_default().push(gw);
+            adj.entry(gv).or_default().push(gw);
+            node_labels.insert(gw, format!("N{gw}"));
+            let su = &seqs[&gu];
+            let sv = &seqs[&gv];
+            let sw: Vec<i8> = (0..l)
+                .map(|s| if su[s] >= 0 { su[s] } else { sv[s] })
+                .collect();
+            seqs.insert(gw, sw);
+            gw
+        } else {
+            // Top-level unrooted join of final 3 active nodes
+            let gw = *next_node;
+            *next_node += 1;
+            node_labels.insert(gw, format!("N{gw}"));
+            for &lx in &active {
+                let gx = local_to_global[lx];
+                adj.entry(gw).or_default().push(gx);
+                adj.entry(gx).or_default().push(gw);
+            }
+            gw
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build_subquadratic_loads_and_backbone(
+        &self,
+        names: &[String],
+        mat: &[i8],
+        bitmasks: &[u8],
+        dist_weights: &[f64],
+        tree_weights: &[f64],
+        n: usize,
+        l: usize,
+        l_eff: f64,
+        ti_cost: f64,
+        tv_cost: f64,
+    ) -> (Vec<f64>, BTreeMap<usize, Vec<usize>>, BTreeMap<usize, String>) {
+        let mut node_labels: BTreeMap<usize, String> =
+            (0..n).map(|i| (i, names[i].clone())).collect();
+        let mut adj: BTreeMap<usize, Vec<usize>> = (0..n).map(|i| (i, Vec::new())).collect();
+
+        if n == 1 {
+            return (vec![0.5; 1], adj, node_labels);
+        }
+        if n == 2 {
+            let d01 = Self::compute_pair_unweighted_jc_dist(&mat[0..l], &mat[l..2 * l], l_eff);
+            let ld = (d01 * 0.5).max(0.5);
+            adj.get_mut(&0).unwrap().push(1);
+            adj.get_mut(&1).unwrap().push(0);
+            return (vec![ld, ld], adj, node_labels);
+        }
+        if n <= 128 {
+            // Exact small-N path (N <= 128) with incremental O(N^2) agglomeration
+            let mut uw_mat = vec![0.0_f64; n * n];
+            for i in 0..n {
+                let ri = &mat[i * l..(i + 1) * l];
+                for j in (i + 1)..n {
+                    let rj = &mat[j * l..(j + 1) * l];
+                    let d = Self::compute_pair_unweighted_jc_dist(ri, rj, l_eff);
+                    uw_mat[i * n + j] = d;
+                    uw_mat[j * n + i] = d;
+                }
+            }
+            let mut loads = vec![0.0_f64; n];
+            for i in 0..n {
+                let mut j_near = if i == 0 { 1 } else { 0 };
+                let mut d_min = uw_mat[i * n + j_near];
+                for j in 0..n {
+                    if j != i && uw_mat[i * n + j] < d_min {
+                        d_min = uw_mat[i * n + j];
+                        j_near = j;
+                    }
+                }
+                let mut deltas: Vec<f64> = (0..n)
+                    .filter(|&k| k != i && k != j_near)
+                    .map(|k| uw_mat[i * n + k] - uw_mat[j_near * n + k])
+                    .collect();
+                let med = median_f64(&mut deltas);
+                loads[i] = (0.5 * (d_min + med)).clamp(0.4, d_min.max(0.8));
             }
 
-            active.retain(|&x| x != u && x != v);
-            active.push(w);
+            if n == 3 {
+                let center = n;
+                adj.insert(center, vec![0, 1, 2]);
+                node_labels.insert(center, format!("N{center}"));
+                for i in 0..3 {
+                    adj.get_mut(&i).unwrap().push(center);
+                }
+                return (loads, adj, node_labels);
+            }
+            if n == 4 {
+                let t: Vec<(Vec<u8>, f64)> = (0..4)
+                    .map(|i| (bitmasks[i * l..(i + 1) * l].to_vec(), loads[i]))
+                    .collect();
+                let splits = [([0, 1], [2, 3]), ([0, 2], [1, 3]), ([0, 3], [1, 2])];
+                let mut best_idx = 0;
+                let mut best_gain = f64::NEG_INFINITY;
+                for (idx, (p1, p2)) in splits.iter().enumerate() {
+                    let (g, _, _) = self.compute_split_mdl_gain_from_children(
+                        &[t[p1[0]].clone(), t[p1[1]].clone()],
+                        &[t[p2[0]].clone(), t[p2[1]].clone()],
+                        l,
+                        l_eff,
+                        ti_cost,
+                        tv_cost,
+                        tree_weights,
+                    );
+                    if g > best_gain {
+                        best_gain = g;
+                        best_idx = idx;
+                    }
+                }
+                if best_gain > 0.0 {
+                    let (p1, p2) = splits[best_idx];
+                    let (u, v) = (4, 5);
+                    adj.insert(u, vec![p1[0], p1[1], v]);
+                    adj.insert(v, vec![p2[0], p2[1], u]);
+                    node_labels.insert(u, format!("N{u}"));
+                    node_labels.insert(v, format!("N{v}"));
+                    for &x in &p1 {
+                        adj.get_mut(&x).unwrap().push(u);
+                    }
+                    for &x in &p2 {
+                        adj.get_mut(&x).unwrap().push(v);
+                    }
+                } else {
+                    let center = 4;
+                    adj.insert(center, vec![0, 1, 2, 3]);
+                    node_labels.insert(center, format!("N{center}"));
+                    for i in 0..4 {
+                        adj.get_mut(&i).unwrap().push(center);
+                    }
+                }
+                return (loads, adj, node_labels);
+            }
+
+            let mut seqs_map: HashMap<usize, Vec<i8>> = (0..n)
+                .map(|i| (i, mat[i * l..(i + 1) * l].to_vec()))
+                .collect();
+            let all_nodes: Vec<usize> = (0..n).collect();
+            let mut next_node = n;
+            self.agglomerate_bounded_cluster(
+                &all_nodes,
+                &mut seqs_map,
+                dist_weights,
+                l,
+                l_eff,
+                &mut adj,
+                &mut node_labels,
+                &mut next_node,
+                false,
+            );
+            self.refine_backbone_nni_mdl(
+                &mut adj,
+                bitmasks,
+                &loads,
+                n,
+                l,
+                l_eff,
+                ti_cost,
+                tv_cost,
+                tree_weights,
+                5,
+            );
+            return (loads, adj, node_labels);
         }
 
-        let w = next_node;
-        node_labels.entry(w).or_insert_with(|| format!("N{w}"));
-        for &x in &active {
-            adj.entry(w).or_default().push(x);
-            adj.get_mut(&x).unwrap().push(w);
+        // Sub-Quadratic O(N log N * L) Hierarchical Tournament Path for N > 128
+        let mut seqs_map: HashMap<usize, Vec<i8>> = (0..n)
+            .map(|i| (i, mat[i * l..(i + 1) * l].to_vec()))
+            .collect();
+        let mut leaf_clusters: Vec<Vec<usize>> = Vec::new();
+        Self::partition_items_recursive(
+            (0..n).collect(),
+            &seqs_map,
+            dist_weights,
+            l_eff,
+            64,
+            &mut leaf_clusters,
+        );
+
+        // Compute 3-point terminal loads within each leaf cluster + 32 global anchors in O(N * L)
+        let n_anc = 32.min(n);
+        let global_anchors: Vec<usize> = (0..n_anc).map(|i| (i * (n - 1)) / (n_anc - 1)).collect();
+        let mut loads = vec![0.5_f64; n];
+        for cluster in &leaf_clusters {
+            let mut ref_set: Vec<usize> = cluster.clone();
+            for &ga in &global_anchors {
+                if !ref_set.contains(&ga) {
+                    ref_set.push(ga);
+                }
+            }
+            let m_ref = ref_set.len();
+            let mut dist_to_ref = vec![0.0_f64; m_ref * m_ref];
+            for a in 0..m_ref {
+                let sa = &seqs_map[&ref_set[a]];
+                for b in (a + 1)..m_ref {
+                    let sb = &seqs_map[&ref_set[b]];
+                    let d = Self::compute_pair_unweighted_jc_dist(sa, sb, l_eff);
+                    dist_to_ref[a * m_ref + b] = d;
+                    dist_to_ref[b * m_ref + a] = d;
+                }
+            }
+            for (loc_i, &gi) in cluster.iter().enumerate() {
+                let mut best_b = if loc_i == 0 { 1 } else { 0 };
+                let mut d_min = dist_to_ref[loc_i * m_ref + best_b];
+                for b in 0..m_ref {
+                    if b != loc_i && dist_to_ref[loc_i * m_ref + b] < d_min {
+                        d_min = dist_to_ref[loc_i * m_ref + b];
+                        best_b = b;
+                    }
+                }
+                let mut deltas: Vec<f64> = (0..m_ref)
+                    .filter(|&k| k != loc_i && k != best_b)
+                    .map(|k| dist_to_ref[loc_i * m_ref + k] - dist_to_ref[best_b * m_ref + k])
+                    .collect();
+                let med = median_f64(&mut deltas);
+                loads[gi] = (0.5 * (d_min + med)).clamp(0.4, d_min.max(0.8));
+            }
         }
 
+        // Hierarchical bottom-up cluster agglomeration into a single degree-3 binary backbone
+        let mut next_node = n;
+        let mut current_roots: Vec<usize> = Vec::with_capacity(leaf_clusters.len());
+        for cluster in &leaf_clusters {
+            let r = self.agglomerate_bounded_cluster(
+                cluster,
+                &mut seqs_map,
+                dist_weights,
+                l,
+                l_eff,
+                &mut adj,
+                &mut node_labels,
+                &mut next_node,
+                true,
+            );
+            current_roots.push(r);
+        }
+
+        while current_roots.len() > 64 {
+            let mut super_clusters: Vec<Vec<usize>> = Vec::new();
+            Self::partition_items_recursive(
+                current_roots,
+                &seqs_map,
+                dist_weights,
+                l_eff,
+                64,
+                &mut super_clusters,
+            );
+            let mut next_roots = Vec::with_capacity(super_clusters.len());
+            for sc in &super_clusters {
+                let r = self.agglomerate_bounded_cluster(
+                    sc,
+                    &mut seqs_map,
+                    dist_weights,
+                    l,
+                    l_eff,
+                    &mut adj,
+                    &mut node_labels,
+                    &mut next_node,
+                    true,
+                );
+                next_roots.push(r);
+            }
+            current_roots = next_roots;
+        }
+
+        self.agglomerate_bounded_cluster(
+            &current_roots,
+            &mut seqs_map,
+            dist_weights,
+            l,
+            l_eff,
+            &mut adj,
+            &mut node_labels,
+            &mut next_node,
+            false,
+        );
+
+        let nni_rounds = if n <= 256 { 5 } else { 3 };
         self.refine_backbone_nni_mdl(
             &mut adj,
             bitmasks,
-            terminal_loads,
+            &loads,
             n,
             l,
             l_eff,
             ti_cost,
             tv_cost,
-            site_weights,
-            5,
+            tree_weights,
+            nni_rounds,
         );
-        (adj, node_labels)
+        (loads, adj, node_labels)
+    }
+
+    fn propagate_directed_fitch_outward(
+        adj: &BTreeMap<usize, Vec<usize>>,
+        states: &mut HashMap<(usize, usize), (Vec<u8>, f64)>,
+        mut queue: VecDeque<(usize, usize, u8)>,
+        n: usize,
+    ) {
+        while let Some((x, y, depth)) = queue.pop_front() {
+            if x < n {
+                continue;
+            }
+            let children: Vec<(Vec<u8>, f64)> = adj[&x]
+                .iter()
+                .copied()
+                .filter(|&nb| nb != y)
+                .map(|nb| states[&(nb, x)].clone())
+                .collect();
+            let new_state = Self::combine_fitch_children(&children);
+            let changed = match states.get(&(x, y)) {
+                Some((old_mask, old_load)) => {
+                    new_state.0 != *old_mask || (new_state.1 - *old_load).abs() > 1e-4
+                }
+                None => true,
+            };
+            states.insert((x, y), new_state);
+            let max_d = if n <= 128 { 12 } else { 3 };
+            if changed && depth < max_d && y >= n {
+                for &z in &adj[&y] {
+                    if z != x {
+                        queue.push_back((y, z, depth + 1));
+                    }
+                }
+            }
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1080,9 +1403,10 @@ impl BushwhackerEngine {
         site_weights: &[f64],
         max_rounds: usize,
     ) {
+        let mut states =
+            self.compute_all_directed_fitch_states(adj, bitmasks, n, l, terminal_loads, l_eff);
+
         for round_idx in 0..max_rounds {
-            let mut states =
-                self.compute_all_directed_fitch_states(adj, bitmasks, n, l, terminal_loads, l_eff);
             let mut improved = false;
 
             let mut internal_edges = Vec::new();
@@ -1133,7 +1457,7 @@ impl BushwhackerEngine {
                 );
                 let (g2, _, _) = self.compute_split_mdl_gain_from_children(
                     &[ta, td],
-                    &[tb, tc],
+                    &[tb.clone(), tc],
                     l,
                     l_eff,
                     ti_cost,
@@ -1143,7 +1467,9 @@ impl BushwhackerEngine {
 
                 let best_g = g0.max(g1).max(g2);
                 if best_g > g0 + 0.10 {
-                    let swap_v = if g1 >= g2 { c } else { d };
+                    let (swap_v, keep_v) = if g1 >= g2 { (c, d) } else { (d, c) };
+                    let t_swap_v = states[&(swap_v, v)].clone();
+
                     adj.get_mut(&u).unwrap().retain(|&x| x != b);
                     adj.get_mut(&b).unwrap().retain(|&x| x != u);
                     adj.get_mut(&v).unwrap().retain(|&x| x != swap_v);
@@ -1154,15 +1480,27 @@ impl BushwhackerEngine {
                     adj.get_mut(&v).unwrap().push(b);
                     adj.get_mut(&b).unwrap().push(v);
 
+                    states.remove(&(b, u));
+                    states.remove(&(u, b));
+                    states.remove(&(swap_v, v));
+                    states.remove(&(v, swap_v));
+                    states.insert((b, v), tb);
+                    states.insert((swap_v, u), t_swap_v);
+
+                    let st_uv = Self::combine_fitch_children(&[
+                        states[&(a, u)].clone(),
+                        states[&(swap_v, u)].clone(),
+                    ]);
+                    let st_vu = Self::combine_fitch_children(&[
+                        states[&(keep_v, v)].clone(),
+                        states[&(b, v)].clone(),
+                    ]);
+                    states.insert((u, v), st_uv);
+                    states.insert((v, u), st_vu);
+
+                    let q = VecDeque::from([(u, a, 0), (u, swap_v, 0), (v, keep_v, 0), (v, b, 0)]);
+                    Self::propagate_directed_fitch_outward(adj, &mut states, q, n);
                     improved = true;
-                    states = self.compute_all_directed_fitch_states(
-                        adj,
-                        bitmasks,
-                        n,
-                        l,
-                        terminal_loads,
-                        l_eff,
-                    );
                 }
             }
 
@@ -1284,6 +1622,11 @@ impl BushwhackerEngine {
                             }
 
                             if let Some((u_swap, v_swap)) = best_pair {
+                                let u_keep = if u_swap == a { b } else { a };
+                                let v_keep = if v_swap == c { d } else { c };
+                                let t_us = states[&(u_swap, u)].clone();
+                                let t_vs = states[&(v_swap, v)].clone();
+
                                 adj.get_mut(&u).unwrap().retain(|&x| x != u_swap);
                                 adj.get_mut(&u_swap).unwrap().retain(|&x| x != u);
                                 adj.get_mut(&v).unwrap().retain(|&x| x != v_swap);
@@ -1294,15 +1637,44 @@ impl BushwhackerEngine {
                                 adj.get_mut(&v).unwrap().push(u_swap);
                                 adj.get_mut(&u_swap).unwrap().push(v);
 
+                                states.remove(&(u_swap, u));
+                                states.remove(&(u, u_swap));
+                                states.remove(&(v_swap, v));
+                                states.remove(&(v, v_swap));
+                                states.insert((u_swap, v), t_us);
+                                states.insert((v_swap, u), t_vs);
+
+                                let st_uw = Self::combine_fitch_children(&[
+                                    states[&(u_keep, u)].clone(),
+                                    states[&(v_swap, u)].clone(),
+                                ]);
+                                let st_vw = Self::combine_fitch_children(&[
+                                    states[&(v_keep, v)].clone(),
+                                    states[&(u_swap, v)].clone(),
+                                ]);
+                                states.insert((u, w), st_uw.clone());
+                                states.insert((v, w), st_vw.clone());
+
+                                let st_wu = Self::combine_fitch_children(&[
+                                    states[&(m_node, w)].clone(),
+                                    st_vw,
+                                ]);
+                                let st_wv = Self::combine_fitch_children(&[
+                                    states[&(m_node, w)].clone(),
+                                    st_uw,
+                                ]);
+                                states.insert((w, u), st_wu);
+                                states.insert((w, v), st_wv);
+
+                                let q = VecDeque::from([
+                                    (u, u_keep, 0),
+                                    (u, v_swap, 0),
+                                    (v, v_keep, 0),
+                                    (v, u_swap, 0),
+                                    (w, m_node, 0),
+                                ]);
+                                Self::propagate_directed_fitch_outward(adj, &mut states, q, n);
                                 improved = true;
-                                states = self.compute_all_directed_fitch_states(
-                                    adj,
-                                    bitmasks,
-                                    n,
-                                    l,
-                                    terminal_loads,
-                                    l_eff,
-                                );
                             }
                         }
                     }
@@ -1374,7 +1746,7 @@ impl BushwhackerEngine {
             }
         }
 
-        // Top-down pass
+        // Top-down pass (with O(d * L) leave-one-out hub acceleration for degree d >= 4)
         for &u in &order {
             let p_opt = parent[&u];
             let children: Vec<usize> = adj[&u]
@@ -1382,13 +1754,69 @@ impl BushwhackerEngine {
                 .copied()
                 .filter(|&nb| Some(nb) != p_opt)
                 .collect();
-            for c in children {
-                if u < n {
+            if u < n {
+                for c in children {
                     states.insert(
                         (u, c),
                         (bitmasks[u * l..(u + 1) * l].to_vec(), terminal_loads[u]),
                     );
-                } else {
+                }
+            } else if adj[&u].len() >= 4 {
+                let all_nbs = &adj[&u];
+                let mut tot_inv = 0.0_f64;
+                let mut tot_counts = vec![[0_u16; 4]; l];
+                for &nb in all_nbs {
+                    let (ref s_mask, m_c) = states[&(nb, u)];
+                    tot_inv += 1.0 / m_c.max(0.4);
+                    for s in 0..l {
+                        let m = s_mask[s];
+                        if m != 15 {
+                            tot_counts[s][0] += (m & 1) as u16;
+                            tot_counts[s][1] += ((m >> 1) & 1) as u16;
+                            tot_counts[s][2] += ((m >> 2) & 1) as u16;
+                            tot_counts[s][3] += ((m >> 3) & 1) as u16;
+                        }
+                    }
+                }
+                for c in children {
+                    let (s_c, m_c) = states[&(c, u)].clone();
+                    let inv_rem = (tot_inv - 1.0 / m_c.max(0.4)).max(1e-6);
+                    let par_load = (1.0 / inv_rem).max(0.4);
+                    let mut out_mask = vec![15_u8; l];
+                    for s in 0..l {
+                        let mc = s_c[s];
+                        let mut c0 = tot_counts[s][0];
+                        let mut c1 = tot_counts[s][1];
+                        let mut c2 = tot_counts[s][2];
+                        let mut c3 = tot_counts[s][3];
+                        if mc != 15 {
+                            c0 -= (mc & 1) as u16;
+                            c1 -= ((mc >> 1) & 1) as u16;
+                            c2 -= ((mc >> 2) & 1) as u16;
+                            c3 -= ((mc >> 3) & 1) as u16;
+                        }
+                        let max_c = c0.max(c1).max(c2.max(c3));
+                        if max_c > 0 {
+                            let mut mask = 0_u8;
+                            if c0 == max_c {
+                                mask |= 1;
+                            }
+                            if c1 == max_c {
+                                mask |= 2;
+                            }
+                            if c2 == max_c {
+                                mask |= 4;
+                            }
+                            if c3 == max_c {
+                                mask |= 8;
+                            }
+                            out_mask[s] = mask;
+                        }
+                    }
+                    states.insert((u, c), (out_mask, par_load));
+                }
+            } else {
+                for c in children {
                     let other_nbs: Vec<(Vec<u8>, f64)> = adj[&u]
                         .iter()
                         .copied()
@@ -1717,10 +2145,24 @@ impl BushwhackerEngine {
                 bad_edges
                     .sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
                 let mut locked_nodes: HashSet<usize> = HashSet::new();
+                let mut alias: HashMap<usize, usize> = HashMap::new();
                 let mut contracted_any = false;
 
-                for (_, u, v) in bad_edges {
-                    if locked_nodes.contains(&u) || locked_nodes.contains(&v) {
+                for (gain, raw_u, raw_v) in bad_edges {
+                    let mut u = raw_u;
+                    while let Some(&au) = alias.get(&u) {
+                        u = au;
+                    }
+                    let mut v = raw_v;
+                    while let Some(&av) = alias.get(&v) {
+                        v = av;
+                    }
+                    if u == v {
+                        continue;
+                    }
+                    if (n <= 128 || gain > -1.0)
+                        && (locked_nodes.contains(&u) || locked_nodes.contains(&v))
+                    {
                         continue;
                     }
                     if !adj.get(&u).map(|x| x.contains(&v)).unwrap_or(false) {
@@ -1737,6 +2179,7 @@ impl BushwhackerEngine {
                         }
                     }
                     adj.get_mut(&v).unwrap().clear();
+                    alias.insert(v, u);
                     locked_nodes.insert(u);
                     locked_nodes.insert(v);
                     contracted_any = true;
@@ -1831,16 +2274,36 @@ impl BushwhackerEngine {
         tv_cost: f64,
         site_weights: &[f64],
     ) -> (f64, f64, Vec<usize>) {
-        let u_sub: Vec<usize> = adj[&u].iter().copied().filter(|&nb| nb != v).collect();
-        let v_sub: Vec<usize> = adj[&v].iter().copied().filter(|&nb| nb != u).collect();
-        if u_sub.len() < 2 || v_sub.len() < 2 {
+        let mut u_sub: Vec<usize> = adj[&u].iter().copied().filter(|&nb| nb != v).collect();
+        let mut v_sub: Vec<usize> = adj[&v].iter().copied().filter(|&nb| nb != u).collect();
+        let deg_u = u_sub.len();
+        let deg_v = v_sub.len();
+        if deg_u < 2 || deg_v < 2 {
             return (-10.0, 0.0, Vec::new());
+        }
+        if u_sub.len() > 16 {
+            u_sub.sort_by(|&a, &b| {
+                states[&(a, u)]
+                    .1
+                    .partial_cmp(&states[&(b, u)].1)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            u_sub.truncate(12);
+        }
+        if v_sub.len() > 16 {
+            v_sub.sort_by(|&a, &b| {
+                states[&(a, v)]
+                    .1
+                    .partial_cmp(&states[&(b, v)].1)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            v_sub.truncate(12);
         }
         let u_children: Vec<(Vec<u8>, f64)> =
             u_sub.iter().map(|&nb| states[&(nb, u)].clone()).collect();
         let v_children: Vec<(Vec<u8>, f64)> =
             v_sub.iter().map(|&nb| states[&(nb, v)].clone()).collect();
-        self.compute_split_mdl_gain_from_children(
+        let (gain_sub, m_opt, sites) = self.compute_split_mdl_gain_from_children(
             &u_children,
             &v_children,
             l,
@@ -1848,7 +2311,10 @@ impl BushwhackerEngine {
             ti_cost,
             tv_cost,
             site_weights,
-        )
+        );
+        let extra_topo = split_topology_cost_nats(deg_u, deg_v)
+            - split_topology_cost_nats(u_children.len(), v_children.len());
+        (gain_sub - extra_topo, m_opt, sites)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2445,7 +2911,7 @@ impl BushwhackerEngine {
         let mut pair_priority_score: HashMap<(usize, usize), f64> = HashMap::new();
 
         for (s, entries) in site_to_branches.iter().enumerate() {
-            if entries.len() < 2 {
+            if entries.len() < 2 || entries.len() > 36 {
                 continue;
             }
             let bg_c = site_mut_counts[s].max(1) as f64;
