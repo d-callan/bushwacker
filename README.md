@@ -3,6 +3,7 @@
 **B**ipartition **U**nification, **S**hunt **H**unting, & **W**eighted **H**ub **A**ggregation via **C**ombinadic **K**olmogorov **E**ntropy **R**eduction
 
 [![Language: Rust](https://img.shields.io/badge/Language-Rust%20%28Edition%202021%29-DEA584.svg)](#installation--rust-cli)
+[![WebApp: Rust WASM](https://img.shields.io/badge/WebApp-GitHub%20Pages%20%28WASM%29-ff4f00.svg)](https://veg.github.io/bushwacker/)
 [![Technical Report](https://img.shields.io/badge/Technical%20Report-PDF%20%2817%20pp.%29-blue.svg)](paper/bushwhacker_report.pdf)
 
 > *"Clear the statistical underbrush."*
@@ -30,9 +31,25 @@ Every proposed evolutionary structure—an internal tree split `e = (u, v)`, a m
 
 ---
 
+## Interactive WebApp (Rust + SIMD WebAssembly)
+
+**Live GitHub Pages App:** **[https://veg.github.io/bushwacker/](https://veg.github.io/bushwacker/)**
+
+BUSHWHACKER ships with a zero-server, 100% client-side **Rust + WebAssembly** web application ([`docs/index.html`](docs/index.html)) built with the Dieter Rams / Braun industrial functionalist design language (`RhizType`) and high-DPI HTML5 `<canvas>` large-tree rendering inspired by `bigtreeviewer.net`:
+
+- **Alignment $\to$ MDL Graph Mode (Rust WASM):** Drag-and-drop any FASTA alignment or load built-in presets (*Mammalian Prestin `N = 116`*, *Vertebrate β-Globin `N = 17`*, *Adaptive Polytomy Radiation `N = 64`*, *HGT / Recombination Mosaic `N = 24`*, *Large Radiation Stress `N = 512`*) to induce the MDL tree and reticulate shunts in milliseconds directly in the browser.
+- **Big-Tree Newick Explorer Mode:** Paste or upload arbitrary Newick trees (or load synthetic 250 / 1,000 / 2,500-tip super-trees) with optional zero-branch-length ($\ell \le \epsilon$) polytomy contraction.
+- **Multi-Scale Visual Encoding:**
+  - **Phylogram**, **Cladogram (Equal)**, and **Circular Ring** layouts with smooth pan/zoom, viewport culling, semantic Level-of-Detail (LOD) label thinning, and a live minimap navigator.
+  - **Automatic Taxonomic / Clade Ribbons:** Translates UCSC assembly accessions (`HLturTru3` $\to$ `Bottlenose dolphin [HLturTru3]`) or prefix guilds (`Clade01_...`) into translucent clade sector bands and outer color bars.
+  - **MDL Polytomy Diamond Hubs ($d \ge 4$) & Collapsible Subtree Wedges:** Click any internal node to fold/unfold its descendant subtree into a proportional summary triangle; `Shift + Click` to isolate a subtree.
+  - **Reticulate Shunt Bezier Chords & Genome-Wide Barcode Track:** Visualizes `SPARSE` convergent shunts (orange dashed arcs) and `INTERVAL` recombinant tracts (blue solid arcs) alongside an interactive site-coherence & synapomorphy coordinate track.
+
+---
+
 ## Installation & Rust CLI
 
-BUSHWHACKER is written in pure, zero-dependency Rust (`Edition 2021`) for instant compilation and native speed (`0.023s` on 17-taxon β-globin; `0.358s` on 116-taxon mammalian *Prestin*).
+BUSHWHACKER is written in native Rust (`Edition 2021`) with 64-site bit-plane SIMD (`POPCNT` / `TZCNT` / 64-bit SWAR Fitch) and multi-threaded `rayon` parallelism (`0.015s` on 17-taxon β-globin; `0.123s` on 116-taxon mammalian *Prestin*; `0.923s` on 4,096 taxa).
 
 ```bash
 cargo build --release
@@ -69,7 +86,7 @@ BUSHWHACKER Summary: prestin.fasta  (N=116 taxa, L=2235 sites)
   Resolved Splits       :   95 /  113 binary splits (12 polytomy hubs)
   Certified Shunts      :    1
     [1] SPARSE  N140 <-> N167  (+4.94 nats, P=99.3%, m=4 sites, codons=[7, 384, 392, 601])
-  Runtime               : 0.3577 s
+  Runtime               : 0.1233 s
 ==============================================================================
 ```
 
@@ -133,25 +150,21 @@ Full derivations, proofs, and multi-panel figures are available in [`paper/bushw
 ## Scaling Performance
 
 **BUSHWHACKER** is engineered to be **strictly sub-quadratic in the number of taxa `N` (`O(N log N · L)`)** and **near-linear in alignment length `L` (`O(L log L)`)**:
-- **128-Bit Popcount Four-Gamete Coherence (`O(L)`):** Packs column character states across at most `128` stratified anchor taxa into stack-allocated `[u64; 2]` bitsets, evaluating Four-Gamete intersection via hardware `POPCNT` instructions.
-- **Top-Down Recursive Pivot-Split Partitioning & Tournament Backbone (`O(N log N · L)`):** Partitions `N > 128` taxa via recursive 2-pivot Jukes–Cantor projection into bounded leaf clusters (`|C_m| ≤ 64`), computes 3-point terminal loads within each leaf cluster plus `32` global anchors (`O(N L)`), and agglomerates cluster Fitch consensus roots bottom-up without ever allocating an `N × N` distance matrix or executing an `O(N³)` loop.
+- **64-Site Bit-Plane SIMD (`BitPlaneWord64`) & 64-Bit SWAR Fitch:** Packs 64 alignment columns into four `u64` bit-planes (`b0, b1, b2, b3`) plus a `valid: u64` mask (`6` bitwise instructions + `2` hardware `POPCNT`s per 64 sites for unweighted distances; hardware `TZCNT`/`BLSR` over non-zero difference bits for weighted Jukes–Cantor distances; and 8-site-per-instruction 64-bit SWAR Fitch parsimony union/intersection).
+- **128-Bit Popcount Four-Gamete Coherence (`O(L)`):** Packs column character states across at most `128` stratified anchor taxa into stack-allocated `[u64; 2]` bitsets, evaluating Four-Gamete intersection in parallel via `rayon` and hardware `POPCNT` instructions.
+- **Top-Down Recursive Pivot-Split Partitioning & Tournament Backbone (`O(N log N · L)`):** Partitions `N > 128` taxa via recursive 2-pivot Jukes–Cantor projection into bounded leaf clusters (`|C_m| ≤ 64`), computes 3-point terminal loads in parallel across leaf clusters plus `32` global anchors (`O(N L)`), and agglomerates cluster Fitch consensus roots bottom-up without ever allocating an `N × N` distance matrix or executing an `O(N³)` loop.
 - **Bounded-Radius Delta-Fitch NNI & Leave-One-Out Hub Propagation (`O(N · L log L)`):** Propagates directed Fitch state updates locally across swapped edges and computes top-down polytomy hub states via `O(d · L)` leave-one-out bit-count subtraction rather than `O(d² · L)` re-aggregation.
 
-| Taxa (`N`) | Sites (`L`) | Rust Engine Runtime (s) | Scaling Mode |
-| :---: | :---: | :---: | :--- |
-| **16** | 1,000 | **0.0058 s** | Taxa scaling (`L = 1,000 bp`) |
-| **32** | 1,000 | **0.0165 s** | Taxa scaling (`L = 1,000 bp`) |
-| **64** | 1,000 | **0.0411 s** | Taxa scaling (`L = 1,000 bp`) |
-| **128** | 1,000 | **0.1038 s** | Taxa scaling (`L = 1,000 bp`) |
-| **256** | 1,000 | **0.1000 s** | Taxa scaling (`L = 1,000 bp`, hierarchical `O(N log N)`) |
-| **512** | 1,000 | **0.2336 s** | Taxa scaling (`L = 1,000 bp`, hierarchical `O(N log N)`) |
-| **1,024** | 1,000 | **0.4375 s** | Taxa scaling (`L = 1,000 bp`, hierarchical `O(N log N)`) |
-| **2,048** | 1,000 | **1.1755 s** | Taxa scaling (`L = 1,000 bp`, hierarchical `O(N log N)`) |
-| **4,096** | 1,000 | **3.2406 s** | Taxa scaling (`L = 1,000 bp`, hierarchical `O(N log N)`) |
-| 64 | **500** | **0.0308 s** | Site scaling (`N = 64 taxa`) |
-| 64 | **2,000** | **0.1692 s** | Site scaling (`N = 64 taxa`) |
-| 64 | **5,000** | **0.4821 s** | Site scaling (`N = 64 taxa`) |
-| 64 | **10,000** | **0.9813 s** | Site scaling (`N = 64 taxa`) |
+| Taxa (`N`) | Sites (`L`) | Rust SIMD + Rayon Runtime (s) | Speedup vs. Initial (`O(N³)`) | Scaling Mode |
+| :---: | :---: | :---: | :---: | :--- |
+| **16** | 1,000 | **0.0034 s** | 2.1× | Taxa scaling (`L = 1,000 bp`) |
+| **64** | 1,000 | **0.0092 s** | 5.9× | Taxa scaling (`L = 1,000 bp`) |
+| **256** | 1,000 | **0.0202 s** | 55.4× | Taxa scaling (`L = 1,000 bp`, hierarchical `O(N log N)`) |
+| **512** | 1,000 | **0.0474 s** | 164.6× | Taxa scaling (`L = 1,000 bp`, hierarchical `O(N log N)`) |
+| **1,024** | 1,000 | **0.1169 s** | **517.2×** | Taxa scaling (`L = 1,000 bp`, hierarchical `O(N log N)`) |
+| **2,048** | 1,000 | **0.3046 s** | — | Taxa scaling (`L = 1,000 bp`, hierarchical `O(N log N)`) |
+| **4,096** | 1,000 | **0.9226 s** | — | Taxa scaling (`L = 1,000 bp`, **sub-second for 4,096 taxa**) |
+| **8,192** | 1,000 | **3.2519 s** | — | Taxa scaling (`L = 1,000 bp`, hierarchical `O(N log N)`) |
 
 ---
 
@@ -159,11 +172,16 @@ Full derivations, proofs, and multi-panel figures are available in [`paper/bushw
 
 ```text
 bushwacker/
-├── Cargo.toml                             # Zero-dependency Rust crate manifest
+├── Cargo.toml                             # Rust crate manifest (native rayon + wasm32 wasm-bindgen)
 ├── README.md                              # Project documentation
+├── .github/workflows/deploy-pages.yml     # GitHub Pages CI/CD workflow for docs/
 ├── src/
-│   ├── lib.rs                             # Native Rust BUSHWHACKER core engine
+│   ├── lib.rs                             # Native Rust + SIMD + WASM BUSHWHACKER core engine
 │   └── main.rs                            # Native Rust CLI binary
+├── docs/
+│   ├── index.html                         # Interactive WebApp (Dieter Rams / Braun UI + Big-Tree Canvas)
+│   ├── pkg/                               # Compiled Rust WebAssembly bundle (wasm-pack)
+│   └── examples/                          # Empirical alignments (prestin.fasta, bglobin.fasta)
 ├── python/
 │   ├── bushwhacker.py                     # Reference Python CLI
 │   └── mdl_phylo.py                       # Reference Python/NumPy MDL engine

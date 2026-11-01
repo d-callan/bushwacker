@@ -4,11 +4,18 @@
 //! Native Rust implementation of the first-principles Minimum Description Length (MDL)
 //! phylogenetic graph induction engine.
 
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fs::File;
-use std::io::{BufRead, BufReader};
+use std::io::BufReader;
 use std::path::Path;
+
+#[cfg(not(target_arch = "wasm32"))]
+use rayon::prelude::*;
+#[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant;
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::prelude::*;
 
 // ---------------------------------------------------------------------------
 // Combinatorial Information-Theoretic Primitives (All in Nats)
@@ -106,7 +113,7 @@ pub fn split_topology_cost_nats(deg_a: usize, deg_b: usize) -> f64 {
 // Data Structures for the MDL Phylogenetic Compression Graph
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ShuntEdge {
     pub node_u: usize,
     pub node_v: usize,
@@ -123,7 +130,7 @@ pub struct ShuntEdge {
     pub posterior_prob: f64,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BranchRecord {
     pub u: usize,
     pub v: usize,
@@ -135,7 +142,7 @@ pub struct BranchRecord {
     pub synapomorphy_sites: Vec<usize>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BushwhackerResult {
     pub names: Vec<String>,
     pub n_taxa: usize,
@@ -155,6 +162,81 @@ pub struct BushwhackerResult {
     pub backbone_tree_nats: f64,
     pub full_graph_nats: f64,
     pub runtime_sec: f64,
+    pub site_weights: Vec<f64>,
+    pub terminal_loads: Vec<f64>,
+}
+
+// ---------------------------------------------------------------------------
+// 64-Site Bit-Plane SIMD Sequence Representation
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct BitPlaneWord64 {
+    pub b0: u64,    // 1 bit per site for A (state 0)
+    pub b1: u64,    // 1 bit per site for C (state 1)
+    pub b2: u64,    // 1 bit per site for G (state 2)
+    pub b3: u64,    // 1 bit per site for T/U (state 3)
+    pub valid: u64, // b0 | b1 | b2 | b3
+}
+
+#[derive(Clone, Debug)]
+pub struct PackedSeq64 {
+    pub words: Vec<BitPlaneWord64>,
+    pub len: usize,
+}
+
+impl PackedSeq64 {
+    #[inline]
+    pub fn from_row(row: &[i8]) -> Self {
+        let len = row.len();
+        let n_words = (len + 63) / 64;
+        let mut words = vec![BitPlaneWord64::default(); n_words];
+        for (w_idx, chunk) in row.chunks(64).enumerate() {
+            let mut b0 = 0_u64;
+            let mut b1 = 0_u64;
+            let mut b2 = 0_u64;
+            let mut b3 = 0_u64;
+            for (bit_idx, &v) in chunk.iter().enumerate() {
+                let bit = 1_u64 << bit_idx;
+                match v {
+                    0 => b0 |= bit,
+                    1 => b1 |= bit,
+                    2 => b2 |= bit,
+                    3 => b3 |= bit,
+                    _ => {}
+                }
+            }
+            words[w_idx] = BitPlaneWord64 {
+                b0,
+                b1,
+                b2,
+                b3,
+                valid: b0 | b1 | b2 | b3,
+            };
+        }
+        Self { words, len }
+    }
+
+    /// Merge two packed sequences (`if u.valid { u } else { v }`) in O(L / 64) bitwise ops.
+    #[inline]
+    pub fn merge_consensus(u: &Self, v: &Self) -> Self {
+        let mut words = Vec::with_capacity(u.words.len());
+        for (wu, wv) in u.words.iter().zip(&v.words) {
+            let fb = !wu.valid;
+            let b0 = wu.b0 | (fb & wv.b0);
+            let b1 = wu.b1 | (fb & wv.b1);
+            let b2 = wu.b2 | (fb & wv.b2);
+            let b3 = wu.b3 | (fb & wv.b3);
+            words.push(BitPlaneWord64 {
+                b0,
+                b1,
+                b2,
+                b3,
+                valid: wu.valid | wv.valid,
+            });
+        }
+        Self { words, len: u.len }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -185,18 +267,15 @@ pub fn translate_bases(b0: i8, b1: i8, b2: i8) -> u8 {
     translate_codon_idx(idx)
 }
 
-pub fn parse_fasta_file<P: AsRef<Path>>(path: P) -> Result<(Vec<String>, Vec<String>), String> {
-    let file = File::open(path.as_ref()).map_err(|e| format!("Failed to open FASTA: {e}"))?;
-    let reader = BufReader::new(file);
+pub fn parse_fasta_str(fasta_text: &str) -> Result<(Vec<String>, Vec<String>), String> {
     let mut names = Vec::new();
     let mut seqs = Vec::new();
     let mut curr_name: Option<String> = None;
     let mut curr_seq = String::new();
 
-    for line_res in reader.lines() {
-        let line = line_res.map_err(|e| format!("Read error: {e}"))?;
+    for line in fasta_text.lines() {
         let trimmed = line.trim();
-        if trimmed.is_empty() {
+        if trimmed.is_empty() || trimmed.starts_with(';') {
             continue;
         }
         if let Some(rest) = trimmed.strip_prefix('>') {
@@ -205,16 +284,44 @@ pub fn parse_fasta_file<P: AsRef<Path>>(path: P) -> Result<(Vec<String>, Vec<Str
                 seqs.push(std::mem::take(&mut curr_seq));
             }
             let first_tok = rest.split_whitespace().next().unwrap_or("").to_string();
-            curr_name = Some(first_tok);
+            curr_name = Some(if first_tok.is_empty() {
+                format!("Seq_{}", names.len() + 1)
+            } else {
+                first_tok
+            });
         } else {
-            curr_seq.push_str(trimmed);
+            for ch in trimmed.chars() {
+                if !ch.is_whitespace() {
+                    curr_seq.push(ch);
+                }
+            }
         }
     }
     if let Some(name) = curr_name {
         names.push(name);
         seqs.push(curr_seq);
     }
+    if names.is_empty() {
+        return Err("No FASTA records found.".to_string());
+    }
+    let max_len = seqs.iter().map(|s| s.len()).max().unwrap_or(0);
+    for s in &mut seqs {
+        if s.len() < max_len {
+            s.extend(std::iter::repeat('-').take(max_len - s.len()));
+        }
+    }
     Ok((names, seqs))
+}
+
+pub fn parse_fasta_file<P: AsRef<Path>>(path: P) -> Result<(Vec<String>, Vec<String>), String> {
+    let file = File::open(path.as_ref()).map_err(|e| format!("Failed to open FASTA: {e}"))?;
+    let mut reader = BufReader::new(file);
+    let mut buf = String::new();
+    use std::io::Read;
+    reader
+        .read_to_string(&mut buf)
+        .map_err(|e| format!("Read error: {e}"))?;
+    parse_fasta_str(&buf)
 }
 
 /// Encode N aligned nucleotide sequences of length L into flat row-major arrays:
@@ -385,6 +492,7 @@ impl BushwhackerEngine {
     }
 
     pub fn infer(&self, names: &[String], seqs: &[String]) -> Result<BushwhackerResult, String> {
+        #[cfg(not(target_arch = "wasm32"))]
         let t0 = Instant::now();
         let n = names.len();
         if n == 0 {
@@ -531,7 +639,10 @@ impl BushwhackerEngine {
             .unwrap_or(if n >= 3 { 3 } else { n });
 
         let newick = self.serialize_newick(&adj, names, &branches, n);
+        #[cfg(not(target_arch = "wasm32"))]
         let runtime_sec = t0.elapsed().as_secs_f64();
+        #[cfg(target_arch = "wasm32")]
+        let runtime_sec = 0.0;
 
         Ok(BushwhackerResult {
             names: names.to_vec(),
@@ -552,6 +663,8 @@ impl BushwhackerEngine {
             backbone_tree_nats: backbone_nats,
             full_graph_nats,
             runtime_sec,
+            site_weights: tree_weights,
+            terminal_loads,
         })
     }
 
@@ -700,9 +813,7 @@ impl BushwhackerEngine {
         }
 
         let delta_local = (l / 6).clamp(40, 180);
-        let mut coh_scores = vec![1.0_f64; m_chars];
-
-        for k in 0..m_chars {
+        let eval_char = |k: usize| -> f64 {
             let ck = char_vecs[k];
             let cbk = char_bar[k];
             let sk = char_sites[k];
@@ -732,14 +843,19 @@ impl BushwhackerEngine {
                     cnt_overlap += 1;
                 }
             }
-            coh_scores[k] = if cnt_overlap >= 3 {
+            if cnt_overlap >= 3 {
                 sum_overlap / (cnt_overlap as f64)
             } else if cnt_long >= 1 {
                 sum_long / (cnt_long as f64)
             } else {
                 1.0
-            };
-        }
+            }
+        };
+
+        #[cfg(not(target_arch = "wasm32"))]
+        let coh_scores: Vec<f64> = (0..m_chars).into_par_iter().map(eval_char).collect();
+        #[cfg(target_arch = "wasm32")]
+        let coh_scores: Vec<f64> = (0..m_chars).map(eval_char).collect();
 
         let mut site_coh = vec![1.0_f64; l];
         let mut site_cnt = vec![0_u32; l];
@@ -795,51 +911,86 @@ impl BushwhackerEngine {
     }
 
     #[inline]
-    fn compute_pair_jc_dist(
-        row_i: &[i8],
-        row_j: &[i8],
+    fn compute_word_weight_sums(site_weights: &[f64]) -> Vec<f64> {
+        site_weights
+            .chunks(64)
+            .map(|ch| ch.iter().sum::<f64>())
+            .collect()
+    }
+
+    /// 64-site bit-plane SIMD weighted Jukes-Cantor distance using hardware TZCNT/BLSR.
+    #[inline]
+    fn compute_pair_jc_dist_packed(
+        pi: &PackedSeq64,
+        pj: &PackedSeq64,
         site_weights: &[f64],
+        word_weight_sums: &[f64],
         l_eff: f64,
     ) -> f64 {
         let mut w_valid = 0.0_f64;
         let mut w_diffs = 0.0_f64;
-        for s in 0..row_i.len() {
-            let bi = row_i[s];
-            let bj = row_j[s];
-            if bi >= 0 && bj >= 0 {
-                let w = site_weights[s];
-                w_valid += w;
-                if bi != bj {
-                    w_diffs += w;
+        let n_words = pi.words.len();
+        for w_idx in 0..n_words {
+            let wi = pi.words[w_idx];
+            let wj = pj.words[w_idx];
+            let valid_both = wi.valid & wj.valid;
+            if valid_both == 0 {
+                continue;
+            }
+            let base = w_idx * 64;
+            let w_len = (pi.len - base).min(64);
+            let full_mask = if w_len == 64 {
+                u64::MAX
+            } else {
+                (1_u64 << w_len) - 1
+            };
+            if valid_both == full_mask {
+                w_valid += word_weight_sums[w_idx];
+            } else {
+                let mut vm = valid_both;
+                while vm != 0 {
+                    let tz = vm.trailing_zeros() as usize;
+                    w_valid += site_weights[base + tz];
+                    vm &= vm - 1;
                 }
+            }
+            let same = (wi.b0 & wj.b0) | (wi.b1 & wj.b1) | (wi.b2 & wj.b2) | (wi.b3 & wj.b3);
+            let mut dm = valid_both & !same;
+            while dm != 0 {
+                let tz = dm.trailing_zeros() as usize;
+                w_diffs += site_weights[base + tz];
+                dm &= dm - 1;
             }
         }
         let p_hat = (w_diffs / w_valid.max(1.0)).clamp(0.0, 0.745);
         -0.75 * (1.0 - (4.0 / 3.0) * p_hat).ln() * l_eff
     }
 
+    /// 64-site bit-plane SIMD unweighted Jukes-Cantor distance using hardware POPCNT.
     #[inline]
-    fn compute_pair_unweighted_jc_dist(row_i: &[i8], row_j: &[i8], l_eff: f64) -> f64 {
+    fn compute_pair_unweighted_jc_dist_packed(
+        pi: &PackedSeq64,
+        pj: &PackedSeq64,
+        l_eff: f64,
+    ) -> f64 {
         let mut n_valid = 0usize;
-        let mut n_diffs = 0usize;
-        for s in 0..row_i.len() {
-            let bi = row_i[s];
-            let bj = row_j[s];
-            if bi >= 0 && bj >= 0 {
-                n_valid += 1;
-                if bi != bj {
-                    n_diffs += 1;
-                }
-            }
+        let mut n_same = 0usize;
+        for (wi, wj) in pi.words.iter().zip(&pj.words) {
+            let valid_both = wi.valid & wj.valid;
+            let same = (wi.b0 & wj.b0) | (wi.b1 & wj.b1) | (wi.b2 & wj.b2) | (wi.b3 & wj.b3);
+            n_valid += valid_both.count_ones() as usize;
+            n_same += same.count_ones() as usize;
         }
+        let n_diffs = n_valid.saturating_sub(n_same);
         let p_hat = ((n_diffs as f64) / (n_valid.max(1) as f64)).clamp(0.0, 0.745);
         -0.75 * (1.0 - (4.0 / 3.0) * p_hat).ln() * l_eff
     }
 
     fn partition_items_recursive(
         items: Vec<usize>,
-        seqs: &HashMap<usize, Vec<i8>>,
+        seqs: &HashMap<usize, PackedSeq64>,
         site_weights: &[f64],
+        word_weight_sums: &[f64],
         l_eff: f64,
         max_cluster_size: usize,
         out_clusters: &mut Vec<Vec<usize>>,
@@ -854,7 +1005,13 @@ impl BushwhackerEngine {
         let mut max_d1 = -1.0_f64;
         for &x in &items {
             if x != p0 {
-                let d = Self::compute_pair_jc_dist(seq_p0, &seqs[&x], site_weights, l_eff);
+                let d = Self::compute_pair_jc_dist_packed(
+                    seq_p0,
+                    &seqs[&x],
+                    site_weights,
+                    word_weight_sums,
+                    l_eff,
+                );
                 if d > max_d1 {
                     max_d1 = d;
                     p1 = x;
@@ -866,7 +1023,13 @@ impl BushwhackerEngine {
         let mut max_d2 = -1.0_f64;
         for &x in &items {
             if x != p1 {
-                let d = Self::compute_pair_jc_dist(seq_p1, &seqs[&x], site_weights, l_eff);
+                let d = Self::compute_pair_jc_dist_packed(
+                    seq_p1,
+                    &seqs[&x],
+                    site_weights,
+                    word_weight_sums,
+                    l_eff,
+                );
                 if d > max_d2 {
                     max_d2 = d;
                     p2 = x;
@@ -878,8 +1041,20 @@ impl BushwhackerEngine {
             .into_iter()
             .map(|x| {
                 let sx = &seqs[&x];
-                let d1 = Self::compute_pair_jc_dist(sx, seq_p1, site_weights, l_eff);
-                let d2 = Self::compute_pair_jc_dist(sx, seq_p2, site_weights, l_eff);
+                let d1 = Self::compute_pair_jc_dist_packed(
+                    sx,
+                    seq_p1,
+                    site_weights,
+                    word_weight_sums,
+                    l_eff,
+                );
+                let d2 = Self::compute_pair_jc_dist_packed(
+                    sx,
+                    seq_p2,
+                    site_weights,
+                    word_weight_sums,
+                    l_eff,
+                );
                 (d1 - d2, x)
             })
             .collect();
@@ -891,17 +1066,34 @@ impl BushwhackerEngine {
         let mid = projections.len() / 2;
         let left: Vec<usize> = projections[..mid].iter().map(|x| x.1).collect();
         let right: Vec<usize> = projections[mid..].iter().map(|x| x.1).collect();
-        Self::partition_items_recursive(left, seqs, site_weights, l_eff, max_cluster_size, out_clusters);
-        Self::partition_items_recursive(right, seqs, site_weights, l_eff, max_cluster_size, out_clusters);
+        Self::partition_items_recursive(
+            left,
+            seqs,
+            site_weights,
+            word_weight_sums,
+            l_eff,
+            max_cluster_size,
+            out_clusters,
+        );
+        Self::partition_items_recursive(
+            right,
+            seqs,
+            site_weights,
+            word_weight_sums,
+            l_eff,
+            max_cluster_size,
+            out_clusters,
+        );
     }
 
     #[allow(clippy::too_many_arguments)]
     fn agglomerate_bounded_cluster(
         &self,
         cluster_nodes: &[usize],
-        seqs: &mut HashMap<usize, Vec<i8>>,
+        seqs: &mut HashMap<usize, PackedSeq64>,
         site_weights: &[f64],
-        l: usize,
+        word_weight_sums: &[f64],
+        _l: usize,
         l_eff: f64,
         adj: &mut BTreeMap<usize, Vec<usize>>,
         node_labels: &mut BTreeMap<usize, String>,
@@ -922,11 +1114,7 @@ impl BushwhackerEngine {
                 adj.entry(u).or_default().push(w);
                 adj.entry(v).or_default().push(w);
                 node_labels.insert(w, format!("N{w}"));
-                let su = &seqs[&u];
-                let sv = &seqs[&v];
-                let sw: Vec<i8> = (0..l)
-                    .map(|s| if su[s] >= 0 { su[s] } else { sv[s] })
-                    .collect();
+                let sw = PackedSeq64::merge_consensus(&seqs[&u], &seqs[&v]);
                 seqs.insert(w, sw);
                 return w;
             } else {
@@ -945,7 +1133,13 @@ impl BushwhackerEngine {
             let si = &seqs[&local_to_global[i]];
             for j in (i + 1)..m {
                 let sj = &seqs[&local_to_global[j]];
-                let d_val = Self::compute_pair_jc_dist(si, sj, site_weights, l_eff);
+                let d_val = Self::compute_pair_jc_dist_packed(
+                    si,
+                    sj,
+                    site_weights,
+                    word_weight_sums,
+                    l_eff,
+                );
                 let v_val = d_val.max(0.5) * (1.0 + (d_val / l_eff.max(1.0)).powi(2));
                 d_mat[i * cap + j] = d_val;
                 d_mat[j * cap + i] = d_val;
@@ -1001,11 +1195,7 @@ impl BushwhackerEngine {
             node_labels.insert(gw, format!("N{gw}"));
 
             if stop_at_one {
-                let su = &seqs[&gu];
-                let sv = &seqs[&gv];
-                let sw: Vec<i8> = (0..l)
-                    .map(|s| if su[s] >= 0 { su[s] } else { sv[s] })
-                    .collect();
+                let sw = PackedSeq64::merge_consensus(&seqs[&gu], &seqs[&gv]);
                 seqs.insert(gw, sw);
             }
 
@@ -1052,7 +1242,6 @@ impl BushwhackerEngine {
         }
 
         if stop_at_one {
-            // Merge the final 2 active nodes into the cluster root
             let gu = local_to_global[active[0]];
             let gv = local_to_global[active[1]];
             let gw = *next_node;
@@ -1061,15 +1250,10 @@ impl BushwhackerEngine {
             adj.entry(gu).or_default().push(gw);
             adj.entry(gv).or_default().push(gw);
             node_labels.insert(gw, format!("N{gw}"));
-            let su = &seqs[&gu];
-            let sv = &seqs[&gv];
-            let sw: Vec<i8> = (0..l)
-                .map(|s| if su[s] >= 0 { su[s] } else { sv[s] })
-                .collect();
+            let sw = PackedSeq64::merge_consensus(&seqs[&gu], &seqs[&gv]);
             seqs.insert(gw, sw);
             gw
         } else {
-            // Top-level unrooted join of final 3 active nodes
             let gw = *next_node;
             *next_node += 1;
             node_labels.insert(gw, format!("N{gw}"));
@@ -1103,21 +1287,29 @@ impl BushwhackerEngine {
         if n == 1 {
             return (vec![0.5; 1], adj, node_labels);
         }
+        let packed_vec: Vec<PackedSeq64> = (0..n)
+            .map(|i| PackedSeq64::from_row(&mat[i * l..(i + 1) * l]))
+            .collect();
+        let word_weight_sums = Self::compute_word_weight_sums(dist_weights);
+
         if n == 2 {
-            let d01 = Self::compute_pair_unweighted_jc_dist(&mat[0..l], &mat[l..2 * l], l_eff);
+            let d01 =
+                Self::compute_pair_unweighted_jc_dist_packed(&packed_vec[0], &packed_vec[1], l_eff);
             let ld = (d01 * 0.5).max(0.5);
             adj.get_mut(&0).unwrap().push(1);
             adj.get_mut(&1).unwrap().push(0);
             return (vec![ld, ld], adj, node_labels);
         }
         if n <= 128 {
-            // Exact small-N path (N <= 128) with incremental O(N^2) agglomeration
+            // Exact small-N path (N <= 128) with 64-site bit-plane SIMD & incremental O(N^2) agglomeration
             let mut uw_mat = vec![0.0_f64; n * n];
             for i in 0..n {
-                let ri = &mat[i * l..(i + 1) * l];
                 for j in (i + 1)..n {
-                    let rj = &mat[j * l..(j + 1) * l];
-                    let d = Self::compute_pair_unweighted_jc_dist(ri, rj, l_eff);
+                    let d = Self::compute_pair_unweighted_jc_dist_packed(
+                        &packed_vec[i],
+                        &packed_vec[j],
+                        l_eff,
+                    );
                     uw_mat[i * n + j] = d;
                     uw_mat[j * n + i] = d;
                 }
@@ -1195,15 +1387,15 @@ impl BushwhackerEngine {
                 return (loads, adj, node_labels);
             }
 
-            let mut seqs_map: HashMap<usize, Vec<i8>> = (0..n)
-                .map(|i| (i, mat[i * l..(i + 1) * l].to_vec()))
-                .collect();
+            let mut seqs_map: HashMap<usize, PackedSeq64> =
+                packed_vec.into_iter().enumerate().collect();
             let all_nodes: Vec<usize> = (0..n).collect();
             let mut next_node = n;
             self.agglomerate_bounded_cluster(
                 &all_nodes,
                 &mut seqs_map,
                 dist_weights,
+                &word_weight_sums,
                 l,
                 l_eff,
                 &mut adj,
@@ -1227,24 +1419,23 @@ impl BushwhackerEngine {
         }
 
         // Sub-Quadratic O(N log N * L) Hierarchical Tournament Path for N > 128
-        let mut seqs_map: HashMap<usize, Vec<i8>> = (0..n)
-            .map(|i| (i, mat[i * l..(i + 1) * l].to_vec()))
-            .collect();
+        let mut seqs_map: HashMap<usize, PackedSeq64> =
+            packed_vec.into_iter().enumerate().collect();
         let mut leaf_clusters: Vec<Vec<usize>> = Vec::new();
         Self::partition_items_recursive(
             (0..n).collect(),
             &seqs_map,
             dist_weights,
+            &word_weight_sums,
             l_eff,
             64,
             &mut leaf_clusters,
         );
 
-        // Compute 3-point terminal loads within each leaf cluster + 32 global anchors in O(N * L)
+        // Compute 3-point terminal loads within each leaf cluster + 32 global anchors in O(N * L / 64)
         let n_anc = 32.min(n);
         let global_anchors: Vec<usize> = (0..n_anc).map(|i| (i * (n - 1)) / (n_anc - 1)).collect();
-        let mut loads = vec![0.5_f64; n];
-        for cluster in &leaf_clusters {
+        let compute_cluster_loads = |cluster: &Vec<usize>| -> Vec<(usize, f64)> {
             let mut ref_set: Vec<usize> = cluster.clone();
             for &ga in &global_anchors {
                 if !ref_set.contains(&ga) {
@@ -1257,11 +1448,12 @@ impl BushwhackerEngine {
                 let sa = &seqs_map[&ref_set[a]];
                 for b in (a + 1)..m_ref {
                     let sb = &seqs_map[&ref_set[b]];
-                    let d = Self::compute_pair_unweighted_jc_dist(sa, sb, l_eff);
+                    let d = Self::compute_pair_unweighted_jc_dist_packed(sa, sb, l_eff);
                     dist_to_ref[a * m_ref + b] = d;
                     dist_to_ref[b * m_ref + a] = d;
                 }
             }
+            let mut out = Vec::with_capacity(cluster.len());
             for (loc_i, &gi) in cluster.iter().enumerate() {
                 let mut best_b = if loc_i == 0 { 1 } else { 0 };
                 let mut d_min = dist_to_ref[loc_i * m_ref + best_b];
@@ -1276,7 +1468,24 @@ impl BushwhackerEngine {
                     .map(|k| dist_to_ref[loc_i * m_ref + k] - dist_to_ref[best_b * m_ref + k])
                     .collect();
                 let med = median_f64(&mut deltas);
-                loads[gi] = (0.5 * (d_min + med)).clamp(0.4, d_min.max(0.8));
+                out.push((gi, (0.5 * (d_min + med)).clamp(0.4, d_min.max(0.8))));
+            }
+            out
+        };
+
+        #[cfg(not(target_arch = "wasm32"))]
+        let cluster_load_lists: Vec<Vec<(usize, f64)>> = leaf_clusters
+            .par_iter()
+            .map(compute_cluster_loads)
+            .collect();
+        #[cfg(target_arch = "wasm32")]
+        let cluster_load_lists: Vec<Vec<(usize, f64)>> =
+            leaf_clusters.iter().map(compute_cluster_loads).collect();
+
+        let mut loads = vec![0.5_f64; n];
+        for list in cluster_load_lists {
+            for (gi, ld) in list {
+                loads[gi] = ld;
             }
         }
 
@@ -1288,6 +1497,7 @@ impl BushwhackerEngine {
                 cluster,
                 &mut seqs_map,
                 dist_weights,
+                &word_weight_sums,
                 l,
                 l_eff,
                 &mut adj,
@@ -1304,6 +1514,7 @@ impl BushwhackerEngine {
                 current_roots,
                 &seqs_map,
                 dist_weights,
+                &word_weight_sums,
                 l_eff,
                 64,
                 &mut super_clusters,
@@ -1314,6 +1525,7 @@ impl BushwhackerEngine {
                     sc,
                     &mut seqs_map,
                     dist_weights,
+                    &word_weight_sums,
                     l,
                     l_eff,
                     &mut adj,
@@ -1330,6 +1542,7 @@ impl BushwhackerEngine {
             &current_roots,
             &mut seqs_map,
             dist_weights,
+            &word_weight_sums,
             l,
             l_eff,
             &mut adj,
@@ -1835,6 +2048,7 @@ impl BushwhackerEngine {
         states
     }
 
+    /// 64-bit SWAR SIMD Fitch combination processing 8 sites per u64 word.
     #[inline]
     pub fn combine_fitch_children(child_list: &[(Vec<u8>, f64)]) -> (Vec<u8>, f64) {
         if child_list.len() == 1 {
@@ -1846,7 +2060,23 @@ impl BushwhackerEngine {
             let (s2, m2) = &child_list[1];
             let mut out = vec![0_u8; l];
             let mut n_mut = 0usize;
-            for i in 0..l {
+            let chunks = l / 8;
+            for c in 0..chunks {
+                let off = c * 8;
+                let w1 = u64::from_ne_bytes(s1[off..off + 8].try_into().unwrap());
+                let w2 = u64::from_ne_bytes(s2[off..off + 8].try_into().unwrap());
+                let inter = w1 & w2;
+                let zero_hi = !(inter.wrapping_add(0x7F7F_7F7F_7F7F_7F7F)) & 0x8080_8080_8080_8080;
+                if zero_hi == 0 {
+                    out[off..off + 8].copy_from_slice(&inter.to_ne_bytes());
+                } else {
+                    n_mut += zero_hi.count_ones() as usize;
+                    let zero_mask = (zero_hi >> 3) - (zero_hi >> 7);
+                    let out_w = inter | ((w1 | w2) & zero_mask);
+                    out[off..off + 8].copy_from_slice(&out_w.to_ne_bytes());
+                }
+            }
+            for i in (chunks * 8)..l {
                 let b1 = s1[i];
                 let b2 = s2[i];
                 let inter = b1 & b2;
@@ -1869,7 +2099,43 @@ impl BushwhackerEngine {
         for (_, m_c) in child_list {
             inv_sum += 1.0 / m_c.max(0.4);
         }
-        for s in 0..l {
+        let chunks = l / 8;
+        for c in 0..chunks {
+            let off = c * 8;
+            let mut w_and = !0_u64;
+            for (s_mask, _) in child_list {
+                let w = u64::from_ne_bytes(s_mask[off..off + 8].try_into().unwrap());
+                w_and &= w;
+            }
+            let zero_hi = !(w_and.wrapping_add(0x7F7F_7F7F_7F7F_7F7F)) & 0x8080_8080_8080_8080;
+            if zero_hi == 0 {
+                out[off..off + 8].copy_from_slice(&w_and.to_ne_bytes());
+            } else {
+                for s in off..(off + 8) {
+                    let mut counts = [0_u16; 4];
+                    for (s_mask, _) in child_list {
+                        let m = s_mask[s];
+                        if m != 15 {
+                            counts[0] += (m & 1) as u16;
+                            counts[1] += ((m >> 1) & 1) as u16;
+                            counts[2] += ((m >> 2) & 1) as u16;
+                            counts[3] += ((m >> 3) & 1) as u16;
+                        }
+                    }
+                    let max_c = counts[0].max(counts[1]).max(counts[2].max(counts[3]));
+                    if max_c > 0 {
+                        let mut mask = 0_u8;
+                        for b in 0..4 {
+                            if counts[b] == max_c {
+                                mask |= 1 << b;
+                            }
+                        }
+                        out[s] = mask;
+                    }
+                }
+            }
+        }
+        for s in (chunks * 8)..l {
             let mut counts = [0_u16; 4];
             for (s_mask, _) in child_list {
                 let m = s_mask[s];
@@ -2121,29 +2387,62 @@ impl BushwhackerEngine {
                     break;
                 }
 
-                let mut bad_edges: Vec<(f64, usize, usize)> = Vec::new();
-                for (u, v) in internal_edges {
-                    let (gain, _, _) = self.evaluate_internal_edge_mdl_gain(
-                        u,
-                        v,
-                        &adj,
-                        &states,
-                        l,
-                        l_eff,
-                        ti_cost,
-                        tv_cost,
-                        site_weights,
-                    );
-                    if gain <= 0.0 {
-                        bad_edges.push((gain, u, v));
-                    }
-                }
+                #[cfg(not(target_arch = "wasm32"))]
+                let mut bad_edges: Vec<(f64, usize, usize)> = internal_edges
+                    .into_par_iter()
+                    .filter_map(|(u, v)| {
+                        let (gain, _, _) = self.evaluate_internal_edge_mdl_gain(
+                            u,
+                            v,
+                            &adj,
+                            &states,
+                            l,
+                            l_eff,
+                            ti_cost,
+                            tv_cost,
+                            site_weights,
+                        );
+                        if gain <= 0.0 {
+                            Some((gain, u, v))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+
+                #[cfg(target_arch = "wasm32")]
+                let mut bad_edges: Vec<(f64, usize, usize)> = internal_edges
+                    .into_iter()
+                    .filter_map(|(u, v)| {
+                        let (gain, _, _) = self.evaluate_internal_edge_mdl_gain(
+                            u,
+                            v,
+                            &adj,
+                            &states,
+                            l,
+                            l_eff,
+                            ti_cost,
+                            tv_cost,
+                            site_weights,
+                        );
+                        if gain <= 0.0 {
+                            Some((gain, u, v))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+
                 if bad_edges.is_empty() {
                     break;
                 }
 
-                bad_edges
-                    .sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+                bad_edges.sort_by(|a, b| {
+                    a.0.partial_cmp(&b.0)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                        .then_with(|| a.1.cmp(&b.1))
+                        .then_with(|| a.2.cmp(&b.2))
+                });
                 let mut locked_nodes: HashSet<usize> = HashSet::new();
                 let mut alias: HashMap<usize, usize> = HashMap::new();
                 let mut contracted_any = false;
@@ -2422,6 +2721,14 @@ impl BushwhackerEngine {
         let mut clean_sites: Vec<usize> = Vec::new();
 
         for s in 0..l {
+            // Fast bitwise invariant-site check: if all children share a common state, steps_star == 0 < 2
+            let mut m_and = 15_u8;
+            for (s_mask, _) in &all_children {
+                m_and &= s_mask[s];
+            }
+            if m_and != 0 {
+                continue;
+            }
             let mut u_valid = 0i16;
             let mut v_valid = 0i16;
             let mut u_miss = [0i16; 4];
@@ -3686,6 +3993,45 @@ impl BushwhackerEngine {
         }
 
         build_sub(root, None, adj, names, &edge_map, &mut visited, n)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// WebAssembly Bindings (wasm32-unknown-unknown)
+// ---------------------------------------------------------------------------
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+pub struct WasmBushwhacker;
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+impl WasmBushwhacker {
+    #[wasm_bindgen(constructor)]
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Induce an MDL phylogenetic graph from a FASTA alignment string and return
+    /// a JSON-serialized `BushwhackerResult`.
+    pub fn infer_fasta(
+        &self,
+        fasta_text: &str,
+        coding_aware: bool,
+        detect_shunts: bool,
+        min_shunt_sites: usize,
+    ) -> Result<String, JsValue> {
+        let (names, seqs) =
+            parse_fasta_str(fasta_text).map_err(|e| JsValue::from_str(&e))?;
+        let engine = BushwhackerEngine::new(
+            coding_aware,
+            detect_shunts,
+            min_shunt_sites.max(2),
+        );
+        let res = engine
+            .infer(&names, &seqs)
+            .map_err(|e| JsValue::from_str(&e))?;
+        serde_json::to_string(&res).map_err(|e| JsValue::from_str(&e.to_string()))
     }
 }
 

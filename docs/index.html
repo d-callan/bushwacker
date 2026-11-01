@@ -1,0 +1,2842 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>BUSHWHACKER | Minimum Description Length Phylogenetic Graph Induction (Rust + WASM)</title>
+  <meta name="description" content="Client-side WebAssembly Minimum Description Length (MDL) phylogenetic tree & reticulate network induction engine with high-scale Canvas LOD tree viewer.">
+  <style>
+    /* Dieter Rams / Braun Industrial Design System (RhizType / RhizAeon family) */
+    :root {
+      --canvas: #f2f1ed;
+      --surface: #ffffff;
+      --surface-subtle: #faf9f6;
+      --surface-recessed: #eae8e1;
+      --surface-hover: #e5e3dc;
+
+      --border-hairline: #e0ded8;
+      --border-normal: #d0cecd;
+      --border-strong: #9c9a94;
+
+      --text-primary: #121212;
+      --text-secondary: #585651;
+      --text-tertiary: #8a8882;
+      --text-dim: #b0aea8;
+
+      --braun-orange: #ff4f00;
+      --braun-orange-hover: #eb4800;
+      --braun-orange-tint: rgba(255, 79, 0, 0.08);
+
+      --braun-dark: #222220;
+      --braun-dark-hover: #333330;
+
+      --status-green: #15803d;
+      --status-green-bg: #ecfdf5;
+      --status-green-border: #a7f3d0;
+
+      --status-blue: #0369a1;
+      --status-blue-bg: #f0f9ff;
+      --status-blue-border: #bae6fd;
+
+      --status-orange: #c2410c;
+      --status-orange-bg: #fff7ed;
+      --status-orange-border: #fed7aa;
+
+      --status-amber: #b45309;
+      --status-amber-bg: #fffbeb;
+      --status-amber-border: #fde68a;
+
+      --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Monaco, Consolas, monospace;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+    }
+
+    body {
+      background-color: var(--canvas);
+      color: var(--text-primary);
+      font-family: var(--font-sans);
+      font-size: 13px;
+      line-height: 1.5;
+      padding: 24px 22px;
+      min-height: 100vh;
+    }
+
+    .container {
+      max-width: 1560px;
+      margin: 0 auto;
+    }
+
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-end;
+      padding-bottom: 16px;
+      margin-bottom: 20px;
+      border-bottom: 2px solid var(--border-normal);
+      flex-wrap: wrap;
+      gap: 16px;
+    }
+
+    .brand-title {
+      font-size: 24px;
+      font-weight: 800;
+      letter-spacing: -0.03em;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .brand-badge {
+      background: var(--braun-orange);
+      color: white;
+      font-size: 11px;
+      font-weight: 700;
+      padding: 2px 8px;
+      border-radius: 3px;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+
+    .brand-model {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: var(--text-secondary);
+      background: var(--surface-recessed);
+      border: 1px solid var(--border-normal);
+      padding: 2px 7px;
+      border-radius: 3px;
+    }
+
+    .subtitle {
+      color: var(--text-secondary);
+      font-size: 12.5px;
+      margin-top: 4px;
+    }
+
+    .nav-tabs {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+
+    .system-status-led {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      background: var(--surface);
+      border: 1px solid var(--border-normal);
+      padding: 6px 11px;
+      border-radius: 4px;
+      font-size: 11px;
+      font-weight: 700;
+      font-family: var(--font-mono);
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      color: var(--text-secondary);
+    }
+
+    .led-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background-color: var(--status-green);
+      box-shadow: 0 0 0 2px rgba(21, 128, 61, 0.2);
+    }
+
+    .tab-btn {
+      background: var(--surface-recessed);
+      border: 1px solid var(--border-normal);
+      padding: 7px 14px;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      border-radius: 4px;
+      color: var(--text-secondary);
+      transition: all 0.15s;
+      text-decoration: none;
+    }
+
+    .tab-btn:hover {
+      background: var(--surface-hover);
+      color: var(--text-primary);
+    }
+
+    .tab-btn.active {
+      background: var(--braun-dark);
+      color: white;
+      border-color: var(--braun-dark);
+    }
+
+    .grid-layout {
+      display: grid;
+      grid-template-columns: 380px minmax(0, 1fr);
+      gap: 20px;
+      align-items: start;
+      transition: grid-template-columns 0.2s ease;
+    }
+
+    .grid-layout.sidebar-collapsed {
+      grid-template-columns: minmax(0, 1fr);
+    }
+
+    .grid-layout.sidebar-collapsed .left-sidebar {
+      display: none;
+    }
+
+    @media (max-width: 1080px) {
+      .grid-layout {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    .panel {
+      background: var(--surface);
+      border: 1px solid var(--border-normal);
+      border-radius: 6px;
+      padding: 18px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.03);
+      margin-bottom: 16px;
+    }
+
+    .panel-title {
+      font-size: 11.5px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--text-secondary);
+      margin-bottom: 12px;
+      padding-bottom: 9px;
+      border-bottom: 1px solid var(--border-hairline);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .panel-title-label {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+    }
+
+    .panel-title-label::before {
+      content: "";
+      width: 4px;
+      height: 12px;
+      background: var(--text-primary);
+      border-radius: 1px;
+    }
+
+    .dropzone {
+      border: 1.5px dashed var(--border-strong);
+      background: var(--surface-subtle);
+      border-radius: 5px;
+      padding: 14px;
+      text-align: center;
+      cursor: pointer;
+      margin-bottom: 12px;
+      transition: all 0.15s;
+    }
+
+    .dropzone:hover, .dropzone.dragover {
+      border-color: var(--braun-orange);
+      background: var(--braun-orange-tint);
+    }
+
+    textarea {
+      width: 100%;
+      height: 155px;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      padding: 9px;
+      border: 1px solid var(--border-normal);
+      border-radius: 4px;
+      background: var(--surface-subtle);
+      color: var(--text-primary);
+      resize: vertical;
+      margin-bottom: 12px;
+    }
+
+    .preset-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-bottom: 12px;
+    }
+
+    .preset-btn {
+      background: var(--surface-recessed);
+      border: 1px solid var(--border-normal);
+      padding: 4px 8px;
+      font-size: 11px;
+      font-weight: 600;
+      border-radius: 3px;
+      cursor: pointer;
+      color: var(--text-primary);
+      transition: all 0.12s;
+    }
+
+    .preset-btn:hover {
+      background: var(--surface-hover);
+      border-color: var(--border-strong);
+    }
+
+    .preset-btn.active-preset {
+      border-color: var(--braun-orange);
+      background: var(--braun-orange-tint);
+      color: var(--braun-orange);
+    }
+
+    .controls-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+      margin-bottom: 12px;
+    }
+
+    .control-item label {
+      display: block;
+      font-size: 11px;
+      color: var(--text-secondary);
+      margin-bottom: 3px;
+      font-weight: 600;
+    }
+
+    .control-item input[type="number"],
+    .control-item input[type="text"],
+    .control-item input[type="range"],
+    .control-item select {
+      width: 100%;
+      padding: 5px 8px;
+      font-size: 12px;
+      font-family: var(--font-mono);
+      border: 1px solid var(--border-normal);
+      border-radius: 4px;
+      background: var(--surface-subtle);
+      color: var(--text-primary);
+    }
+
+    .checkbox-row {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      margin-bottom: 14px;
+      font-size: 12px;
+      color: var(--text-secondary);
+    }
+
+    .checkbox-row label {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      cursor: pointer;
+    }
+
+    .run-btn {
+      width: 100%;
+      background: var(--braun-orange);
+      color: white;
+      border: none;
+      padding: 11px 16px;
+      font-size: 12.5px;
+      font-weight: 700;
+      border-radius: 4px;
+      cursor: pointer;
+      letter-spacing: 0.03em;
+      text-transform: uppercase;
+      transition: background 0.15s;
+    }
+
+    .run-btn:hover {
+      background: var(--braun-orange-hover);
+    }
+
+    .run-btn:disabled {
+      opacity: 0.55;
+      cursor: not-allowed;
+    }
+
+    .summary-strip {
+      display: grid;
+      grid-template-columns: repeat(6, 1fr);
+      gap: 10px;
+      margin-bottom: 14px;
+    }
+
+    @media (max-width: 1280px) {
+      .summary-strip {
+        grid-template-columns: repeat(3, 1fr);
+      }
+    }
+
+    .stat-card {
+      background: var(--surface-subtle);
+      border: 1px solid var(--border-hairline);
+      border-left: 3px solid var(--braun-dark);
+      padding: 9px 12px;
+      border-radius: 4px;
+    }
+
+    .stat-card.accent {
+      border-left-color: var(--braun-orange);
+    }
+
+    .stat-card.green {
+      border-left-color: var(--status-green);
+    }
+
+    .stat-card.amber {
+      border-left-color: var(--status-amber);
+    }
+
+    .stat-card.blue {
+      border-left-color: var(--status-blue);
+    }
+
+    .stat-label {
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--text-tertiary);
+      font-weight: 700;
+    }
+
+    .stat-value {
+      font-size: 18px;
+      font-weight: 800;
+      font-family: var(--font-mono);
+      margin-top: 2px;
+      color: var(--text-primary);
+    }
+
+    .stat-sub {
+      font-size: 10.5px;
+      color: var(--text-secondary);
+      font-family: var(--font-mono);
+    }
+
+    /* Viewer Toolbar & BigTreeViewer-Inspired Canvas Enclosure */
+    .viewer-toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px 12px;
+      align-items: center;
+      justify-content: space-between;
+      padding: 9px 12px;
+      background: var(--surface-subtle);
+      border: 1px solid var(--border-normal);
+      border-bottom: none;
+      border-radius: 5px 5px 0 0;
+    }
+
+    .toolbar-group {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+
+    .toolbar-label {
+      font-size: 10.5px;
+      font-weight: 700;
+      text-transform: uppercase;
+      color: var(--text-tertiary);
+      letter-spacing: 0.04em;
+    }
+
+    .toolbar-select, .toolbar-input {
+      padding: 4px 8px;
+      font-size: 11.5px;
+      font-family: var(--font-mono);
+      border: 1px solid var(--border-normal);
+      border-radius: 3px;
+      background: var(--surface);
+      color: var(--text-primary);
+    }
+
+    .btn-secondary {
+      background: var(--surface-recessed);
+      border: 1px solid var(--border-normal);
+      padding: 4px 10px;
+      font-size: 11px;
+      font-weight: 600;
+      border-radius: 3px;
+      cursor: pointer;
+      color: var(--text-primary);
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+    }
+
+    .btn-secondary:hover {
+      background: var(--surface-hover);
+      border-color: var(--border-strong);
+    }
+
+    .btn-secondary.active {
+      background: var(--braun-dark);
+      color: #fff;
+      border-color: var(--braun-dark);
+    }
+
+    .canvas-enclosure {
+      position: relative;
+      width: 100%;
+      height: 620px;
+      background: #fbfaf7;
+      border: 1px solid var(--border-normal);
+      border-radius: 0 0 5px 5px;
+      overflow: hidden;
+      user-select: none;
+    }
+
+    .canvas-enclosure:fullscreen,
+    .canvas-enclosure.fullscreen-fallback {
+      position: fixed;
+      inset: 0;
+      width: 100vw;
+      height: 100vh;
+      z-index: 9999;
+      border-radius: 0;
+    }
+
+    #treeCanvas {
+      width: 100%;
+      height: 100%;
+      display: block;
+      cursor: grab;
+    }
+
+    #treeCanvas:active {
+      cursor: grabbing;
+    }
+
+    /* Floating Corner Controls (BigTreeViewer inspired, Braun styled) */
+    .viewer-corner-controls {
+      position: absolute;
+      top: 10px;
+      left: 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      z-index: 20;
+    }
+
+    .corner-btn {
+      width: 30px;
+      height: 30px;
+      background: rgba(255, 255, 255, 0.92);
+      border: 1px solid var(--border-normal);
+      border-radius: 4px;
+      display: grid;
+      place-items: center;
+      font-family: var(--font-mono);
+      font-size: 14px;
+      font-weight: 700;
+      color: var(--text-primary);
+      cursor: pointer;
+      box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+      backdrop-filter: blur(6px);
+      transition: all 0.12s;
+    }
+
+    .corner-btn:hover {
+      background: var(--braun-dark);
+      color: #fff;
+      border-color: var(--braun-dark);
+    }
+
+    /* Breadcrumb / Subtree Focus Pill */
+    .subtree-banner {
+      position: absolute;
+      top: 10px;
+      left: 50px;
+      z-index: 20;
+      background: rgba(34, 34, 32, 0.92);
+      color: #fff;
+      padding: 5px 11px;
+      border-radius: 4px;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.15);
+    }
+
+    /* Minimap Navigator */
+    .minimap-box {
+      position: absolute;
+      bottom: 10px;
+      right: 10px;
+      width: 168px;
+      height: 116px;
+      background: rgba(255, 255, 255, 0.92);
+      border: 1px solid var(--border-normal);
+      border-radius: 4px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+      z-index: 20;
+      overflow: hidden;
+      backdrop-filter: blur(6px);
+    }
+
+    .minimap-label {
+      position: absolute;
+      top: 3px;
+      left: 6px;
+      font-size: 9px;
+      font-family: var(--font-mono);
+      font-weight: 700;
+      text-transform: uppercase;
+      color: var(--text-tertiary);
+      pointer-events: none;
+    }
+
+    /* Floating Hover Tooltip */
+    .canvas-tooltip {
+      position: absolute;
+      pointer-events: none;
+      z-index: 30;
+      background: rgba(18, 18, 18, 0.94);
+      color: #faf9f6;
+      padding: 8px 11px;
+      border-radius: 4px;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      line-height: 1.45;
+      max-width: 340px;
+      box-shadow: 0 4px 14px rgba(0,0,0,0.22);
+      border-left: 3px solid var(--braun-orange);
+    }
+
+    /* Legend & Inspector Bar */
+    .legend-bar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px 14px;
+      padding: 9px 12px;
+      background: var(--surface-subtle);
+      border: 1px solid var(--border-hairline);
+      border-radius: 4px;
+      margin-top: 10px;
+      align-items: center;
+      font-size: 11px;
+    }
+
+    .legend-item {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      font-family: var(--font-mono);
+      font-weight: 600;
+    }
+
+    .swatch {
+      width: 11px;
+      height: 11px;
+      border-radius: 2px;
+      border: 1px solid rgba(0,0,0,0.2);
+      display: inline-block;
+    }
+
+    .inspector-box {
+      margin-top: 12px;
+      padding: 12px 14px;
+      background: var(--surface-subtle);
+      border: 1px solid var(--border-normal);
+      border-left: 3px solid var(--braun-orange);
+      border-radius: 4px;
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+      gap: 8px 14px;
+    }
+
+    .meta-key {
+      color: var(--text-tertiary);
+      font-weight: 700;
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+
+    .meta-val {
+      font-family: var(--font-mono);
+      font-weight: 600;
+      font-size: 12px;
+      color: var(--text-primary);
+      word-break: break-word;
+    }
+
+    .pill {
+      display: inline-block;
+      padding: 2px 7px;
+      border-radius: 3px;
+      font-size: 10.5px;
+      font-weight: 700;
+      font-family: var(--font-mono);
+    }
+
+    .pill-sparse {
+      background: var(--status-orange-bg);
+      color: var(--status-orange);
+      border: 1px solid var(--status-orange-border);
+    }
+
+    .pill-interval {
+      background: var(--status-blue-bg);
+      color: var(--status-blue);
+      border: 1px solid var(--status-blue-border);
+    }
+
+    .pill-polytomy {
+      background: var(--status-amber-bg);
+      color: var(--status-amber);
+      border: 1px solid var(--status-amber-border);
+    }
+
+    .pill-resolved {
+      background: var(--status-green-bg);
+      color: var(--status-green);
+      border: 1px solid var(--status-green-border);
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 11.5px;
+      margin-top: 6px;
+    }
+
+    th {
+      background: var(--surface-recessed);
+      text-align: left;
+      padding: 7px 9px;
+      font-size: 10.5px;
+      text-transform: uppercase;
+      color: var(--text-secondary);
+      border-bottom: 1px solid var(--border-normal);
+    }
+
+    td {
+      padding: 6px 9px;
+      border-bottom: 1px solid var(--border-hairline);
+      font-family: var(--font-mono);
+    }
+
+    tr.clickable-row {
+      cursor: pointer;
+    }
+
+    tr.clickable-row:hover {
+      background: var(--braun-orange-tint);
+    }
+
+    .hidden {
+      display: none !important;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <div>
+        <div class="brand-title">
+          BUSHWHACKER
+          <span class="brand-badge">Rust + SIMD WASM v0.1</span>
+          <span class="brand-model">MDL-GRAPH / O(N log N &middot; L)</span>
+        </div>
+        <div class="subtitle">
+          Bipartition Unification, Shunt Hunting &amp; Weighted Hub Aggregation via Combinadic Kolmogorov Entropy Reduction
+        </div>
+      </div>
+      <div class="nav-tabs">
+        <div class="system-status-led">
+          <span class="led-dot" id="wasmLed"></span>
+          <span id="wasmStatus">Loading WASM...</span>
+        </div>
+        <button class="tab-btn active" id="tabBtnInduce" onclick="switchModeTab('induce')">1. Alignment &rarr; MDL Graph</button>
+        <button class="tab-btn" id="tabBtnNewick" onclick="switchModeTab('newick')">2. Big-Tree Newick Explorer</button>
+        <button class="tab-btn" id="tabBtnTheory" onclick="switchModeTab('theory')">3. MDL Ledger &amp; Shunt Audit</button>
+        <a href="https://github.com/veg/bushwacker" target="_blank" class="tab-btn">GitHub Repo &nearr;</a>
+      </div>
+    </header>
+
+    <div class="grid-layout" id="mainGrid">
+      <!-- LEFT CONTROL PANEL -->
+      <div class="left-sidebar">
+        <!-- MODE A: FASTA ALIGNMENT INDUCTION -->
+        <div class="panel" id="panelInduceInput">
+          <div class="panel-title">
+            <span class="panel-title-label">1. Input Alignment (FASTA)</span>
+            <span style="font-family:var(--font-mono);font-size:10.5px;color:var(--text-tertiary);" id="alignMetaBadge">Ready</span>
+          </div>
+
+          <div class="dropzone" id="fastaDropzone" onclick="document.getElementById('fastaFileInput').click()">
+            <strong>Drop FASTA alignment here</strong> or click to browse<br>
+            <span style="font-size:11px;color:var(--text-tertiary);">Nucleotide or coding sequences (.fasta, .fa, .fna)</span>
+            <input type="file" id="fastaFileInput" accept=".fa,.fasta,.fna,.txt" style="display:none" onchange="handleFastaFile(event)">
+          </div>
+
+          <div style="font-size:10.5px;font-weight:700;color:var(--text-secondary);margin-bottom:5px;text-transform:uppercase;">
+            Empirical &amp; Synthetic Benchmarks:
+          </div>
+          <div class="preset-row">
+            <button class="preset-btn active-preset" id="preset_prestin" onclick="loadFastaPreset('prestin')">Mammalian Prestin (N=116, Echolocation)</button>
+            <button class="preset-btn" id="preset_bglobin" onclick="loadFastaPreset('bglobin')">Vertebrate &beta;-Globin (N=17)</button>
+            <button class="preset-btn" id="preset_polytomy" onclick="loadFastaPreset('polytomy')">Adaptive Polytomy Radiation (N=64)</button>
+            <button class="preset-btn" id="preset_hgt" onclick="loadFastaPreset('hgt')">HGT / Recombination Mosaic (N=24)</button>
+            <button class="preset-btn" id="preset_large512" onclick="loadFastaPreset('large512')">Large Radiation Stress (N=512)</button>
+          </div>
+
+          <textarea id="fastaInput" spellcheck="false" placeholder=">Taxon_1&#10;ATGGGT..."></textarea>
+
+          <div class="panel-title" style="margin-top:4px;">
+            <span class="panel-title-label">2. MDL Induction Parameters</span>
+          </div>
+
+          <div class="controls-grid">
+            <div class="control-item">
+              <label>Min Shunt Sites (m_min)</label>
+              <input type="number" id="paramMinShunt" value="2" min="2" max="20" step="1">
+            </div>
+            <div class="control-item">
+              <label>Collapse Support P_MDL &lt;</label>
+              <input type="number" id="paramMinSupport" value="0.50" min="0.0" max="0.99" step="0.05" onchange="applyVisualFilters()">
+            </div>
+          </div>
+
+          <div class="checkbox-row">
+            <label>
+              <input type="checkbox" id="paramCoding" checked>
+              Auto-detect coding frame &amp; codon degeneracy weights
+            </label>
+            <label>
+              <input type="checkbox" id="paramShunts" checked>
+              Peel reticulate shunts (SPARSE convergence &amp; INTERVAL HGT)
+            </label>
+            <label>
+              <input type="checkbox" id="paramHumanLabels" checked onchange="renderCanvas()">
+              Translate UCSC assembly IDs to species names (Prestin)
+            </label>
+          </div>
+
+          <button class="run-btn" id="runInduceBtn" onclick="runFastaInduction()">Induce MDL Graph (Rust WASM)</button>
+        </div>
+
+        <!-- MODE B: DIRECT NEWICK BIG-TREE EXPLORER -->
+        <div class="panel hidden" id="panelNewickInput">
+          <div class="panel-title">
+            <span class="panel-title-label">1. Direct Newick Tree Explorer</span>
+          </div>
+
+          <div class="dropzone" onclick="document.getElementById('nwkFileInput').click()">
+            <strong>Drop Newick (.nwk / .treefile) here</strong> or click to browse<br>
+            <span style="font-size:11px;color:var(--text-tertiary);">Supports 10 to 50,000+ tips with zero-length polytomy audit</span>
+            <input type="file" id="nwkFileInput" accept=".nwk,.tree,.treefile,.newick,.txt" style="display:none" onchange="handleNewickFile(event)">
+          </div>
+
+          <div style="font-size:10.5px;font-weight:700;color:var(--text-secondary);margin-bottom:5px;text-transform:uppercase;">
+            Big-Tree Scale Presets:
+          </div>
+          <div class="preset-row">
+            <button class="preset-btn" onclick="loadSyntheticNewick(250)">250-Tip Radiation</button>
+            <button class="preset-btn" onclick="loadSyntheticNewick(1000)">1,000-Tip Phylogeny</button>
+            <button class="preset-btn" onclick="loadSyntheticNewick(2500)">2,500-Tip Super-Tree</button>
+          </div>
+
+          <textarea id="newickInput" spellcheck="false" placeholder="((A:0.01,B:0.02)0.99:0.05,C:0.03,D:0.000001);"></textarea>
+
+          <div class="controls-grid">
+            <div class="control-item">
+              <label>Zero-Branch Polytomy &epsilon;</label>
+              <input type="number" id="paramZeroEps" value="0.00005" min="0" max="0.05" step="0.00005">
+            </div>
+            <div class="control-item">
+              <label>Clade Ribbon Depth</label>
+              <input type="number" id="paramRibbonDepth" value="3" min="1" max="8" step="1" onchange="renderCanvas()">
+            </div>
+          </div>
+
+          <button class="run-btn" onclick="loadCustomNewick()">Render &amp; Audit Newick Tree</button>
+        </div>
+
+        <!-- VIEWER DISPLAY & CLADE CONTROLS -->
+        <div class="panel">
+          <div class="panel-title">
+            <span class="panel-title-label">Viewport &amp; Clade Ribbons</span>
+            <button class="btn-secondary" onclick="expandAllClades()">Expand All</button>
+          </div>
+
+          <div class="controls-grid">
+            <div class="control-item">
+              <label>Label Font Size (px)</label>
+              <input type="range" id="paramFontSize" min="8" max="16" value="11" oninput="renderCanvas()">
+            </div>
+            <div class="control-item">
+              <label>Branch Thickness</label>
+              <input type="range" id="paramStrokeWidth" min="1" max="4" step="0.5" value="1.6" oninput="renderCanvas()">
+            </div>
+          </div>
+
+          <div class="checkbox-row" style="margin-bottom:6px;">
+            <label>
+              <input type="checkbox" id="chkShowRibbons" checked onchange="renderCanvas()">
+              Show outer taxonomic / clade ribbons
+            </label>
+            <label>
+              <input type="checkbox" id="chkShowPolytomyBadges" checked onchange="renderCanvas()">
+              Highlight polytomy hubs (degree d &ge; 4)
+            </label>
+            <label>
+              <input type="checkbox" id="chkShowShunts" checked onchange="renderCanvas()">
+              Show reticulate shunt arcs (SPARSE / INTERVAL)
+            </label>
+            <label>
+              <input type="checkbox" id="chkAutoLOD" checked onchange="renderCanvas()">
+              Semantic LOD (thin labels when zoomed out)
+            </label>
+          </div>
+
+          <div style="font-size:10.5px;color:var(--text-tertiary);border-top:1px solid var(--border-hairline);padding-top:8px;">
+            <strong>Tip:</strong> Click any internal node or polytomy hub to <strong>Collapse/Expand</strong> its clade, or Shift+Click to <strong>Isolate Subtree</strong>.
+          </div>
+        </div>
+      </div>
+
+      <!-- RIGHT WORKSPACE: SUMMARY + INTERACTIVE CANVAS + LEDGER -->
+      <div>
+        <div class="panel" style="padding:16px;">
+          <!-- SUMMARY METRIC CARDS -->
+          <div class="summary-strip">
+            <div class="stat-card accent">
+              <div class="stat-label">Alignment / Taxa</div>
+              <div class="stat-value" id="statTaxa">0</div>
+              <div class="stat-sub" id="statSites">L = 0 bp</div>
+            </div>
+            <div class="stat-card green">
+              <div class="stat-label">Net MDL Graph DL</div>
+              <div class="stat-value" id="statGraphNats">0.0</div>
+              <div class="stat-sub" id="statCompressionPct">vs Star Null</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-label">Resolved Splits</div>
+              <div class="stat-value" id="statSplits">0 / 0</div>
+              <div class="stat-sub" id="statResolutionPct">Binary resolution</div>
+            </div>
+            <div class="stat-card amber">
+              <div class="stat-label">Polytomy Hubs (d&ge;4)</div>
+              <div class="stat-value" id="statPolytomies">0</div>
+              <div class="stat-sub" id="statMaxDegree">Max degree: 3</div>
+            </div>
+            <div class="stat-card blue">
+              <div class="stat-label">Certified Shunts</div>
+              <div class="stat-value" id="statShunts">0</div>
+              <div class="stat-sub" id="statShuntGain">+0.0 nats saved</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-label">WASM Runtime</div>
+              <div class="stat-value" id="statRuntime">0 ms</div>
+              <div class="stat-sub">Client-side SIMD</div>
+            </div>
+          </div>
+
+          <!-- CANVAS TOOLBAR -->
+          <div class="viewer-toolbar">
+            <div class="toolbar-group">
+              <span class="toolbar-label">Layout:</span>
+              <button class="btn-secondary active" id="btnLayoutPhylogram" onclick="setLayoutMode('phylogram')">Phylogram</button>
+              <button class="btn-secondary" id="btnLayoutCladogram" onclick="setLayoutMode('cladogram')">Cladogram (Equal)</button>
+              <button class="btn-secondary" id="btnLayoutCircular" onclick="setLayoutMode('circular')">Circular Ring</button>
+
+              <span class="toolbar-label" style="margin-left:8px;">Color By:</span>
+              <select class="toolbar-select" id="selColorMode" onchange="renderCanvas()">
+                <option value="clade" selected>Taxonomic / Clade Ribbon Group</option>
+                <option value="support">MDL Posterior Support (P_MDL)</option>
+                <option value="mutations">Branch Mutation Load (m_e)</option>
+                <option value="regime">Topology Regime (Polytomy / Shunt / Binary)</option>
+              </select>
+            </div>
+
+            <div class="toolbar-group">
+              <input type="text" class="toolbar-input" id="searchTaxonInput" placeholder="Search taxon / clade..." style="width:170px;" oninput="handleSearchTaxon()">
+              <button class="btn-secondary" onclick="exportNewickFile()">Export Newick</button>
+              <button class="btn-secondary" onclick="exportJSONFile()">Export JSON</button>
+              <button class="btn-secondary" onclick="exportPNGFile()">Export PNG</button>
+            </div>
+          </div>
+
+          <!-- HIGH-DPI CANVAS VIEWPORT -->
+          <div class="canvas-enclosure" id="canvasEnclosure">
+            <canvas id="treeCanvas"></canvas>
+
+            <!-- Floating Corner Controls -->
+            <div class="viewer-corner-controls">
+              <button class="corner-btn" title="Zoom In (+)" onclick="zoomBy(1.28)">+</button>
+              <button class="corner-btn" title="Zoom Out (-)" onclick="zoomBy(0.78)">&minus;</button>
+              <button class="corner-btn" title="Fit Tree to Screen" onclick="fitTreeToScreen()">&#8865;</button>
+              <button class="corner-btn" title="Toggle Left Sidebar" onclick="toggleSidebar()">&#9703;</button>
+              <button class="corner-btn" title="Toggle Fullscreen" onclick="toggleFullscreen()">&#9974;</button>
+            </div>
+
+            <!-- Subtree Isolation Banner -->
+            <div class="subtree-banner hidden" id="subtreeBanner">
+              <span id="subtreeBannerText">Viewing Subtree</span>
+              <button class="btn-secondary" style="padding:2px 7px;font-size:10px;" onclick="resetSubtreeFocus()">Reset to Full Tree</button>
+            </div>
+
+            <!-- Live Minimap -->
+            <div class="minimap-box" id="minimapBox">
+              <div class="minimap-label">Overview</div>
+              <canvas id="minimapCanvas" width="168" height="116"></canvas>
+            </div>
+
+            <!-- Hover Tooltip -->
+            <div class="canvas-tooltip hidden" id="canvasTooltip"></div>
+          </div>
+
+          <!-- LEGEND BAR -->
+          <div class="legend-bar" id="legendBar"></div>
+
+          <!-- INTERACTIVE NODE / BRANCH / SHUNT INSPECTOR -->
+          <div class="inspector-box" id="inspectorBox">
+            <div>
+              <div class="meta-key">Selected Element</div>
+              <div class="meta-val" id="inspTitle">Click any branch, polytomy hub, or shunt arc</div>
+            </div>
+            <div>
+              <div class="meta-key">Topological Status</div>
+              <div class="meta-val" id="inspType">&mdash;</div>
+            </div>
+            <div>
+              <div class="meta-key">MDL Ledger (&Delta;L / P_MDL)</div>
+              <div class="meta-val" id="inspMdl">&mdash;</div>
+            </div>
+            <div>
+              <div class="meta-key">Mutations &amp; Branch Length</div>
+              <div class="meta-val" id="inspMut">&mdash;</div>
+            </div>
+            <div style="grid-column: 1 / -1;">
+              <div class="meta-key">Synapomorphy / Parallel Shunt Sites (0-based Alignment Coordinates &amp; Codons)</div>
+              <div class="meta-val" id="inspSites" style="font-size:11px;color:var(--text-secondary);">Select an internal split or reticulate shunt to inspect its exact supporting coordinates.</div>
+            </div>
+          </div>
+
+          <!-- ALIGNMENT SITE COHERENCE & SHUNT BARCODE TRACK -->
+          <div style="margin-top:12px;">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
+              <span style="font-size:10.5px;font-weight:700;text-transform:uppercase;color:var(--text-secondary);">
+                Dual-Entropy Site Coherence Weight Track w_s &amp; Certified Shunt Coordinates (1..L)
+              </span>
+              <span style="font-size:10.5px;font-family:var(--font-mono);color:var(--text-tertiary);" id="barcodeCaption">
+                Orange ticks = SPARSE convergence sites | Blue spans = INTERVAL HGT blocks | Green ticks = Selected split synapomorphies
+              </span>
+            </div>
+            <canvas id="barcodeCanvas" height="54" style="width:100%;height:54px;background:#f5f4f0;border:1px solid var(--border-normal);border-radius:4px;display:block;"></canvas>
+          </div>
+        </div>
+
+        <!-- CERTIFIED SHUNTS & POLYTOMY AUDIT TABLES -->
+        <div class="panel" id="panelAuditTables">
+          <div class="panel-title">
+            <span class="panel-title-label">Certified Reticulate Shunts &amp; Top MDL Bipartitions</span>
+            <span style="font-family:var(--font-mono);font-size:11px;color:var(--text-secondary);" id="shuntTableCount">0 Shunts</span>
+          </div>
+
+          <div id="shuntsTableWrapper" style="overflow-x:auto;margin-bottom:16px;">
+            <table>
+              <thead>
+                <tr>
+                  <th>Shunt ID</th>
+                  <th>Mode</th>
+                  <th>Endpoints (u &harr; v)</th>
+                  <th>Shared Mutations</th>
+                  <th>Data Savings</th>
+                  <th>Mask + Endpoint Tax</th>
+                  <th>Net &Delta;L Gain</th>
+                  <th>P_MDL</th>
+                  <th>Sites / Codons</th>
+                </tr>
+              </thead>
+              <tbody id="shuntsTableBody"></tbody>
+            </table>
+          </div>
+
+          <div class="panel-title" style="margin-top:8px;">
+            <span class="panel-title-label">Internal Bipartition MDL Ledger (Click row to highlight split on tree)</span>
+          </div>
+          <div style="overflow-x:auto;max-height:260px;overflow-y:auto;">
+            <table>
+              <thead>
+                <tr>
+                  <th>Edge (u &ndash; v)</th>
+                  <th>Incident Degrees</th>
+                  <th>Effective Mutations (m_e)</th>
+                  <th>Branch Length</th>
+                  <th>Net &Delta;L Gain (nats)</th>
+                  <th>Posterior P_MDL</th>
+                  <th>Clean Synapomorphy Sites</th>
+                </tr>
+              </thead>
+              <tbody id="branchesTableBody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script type="module">
+    import init, { WasmBushwhacker } from './pkg/bushwhacker.js';
+
+    // Distinct Okabe-Ito + Braun Industrial Palette for Taxonomic / Clade Ribbons
+    const CLADE_PALETTE = [
+      "#0072B2", // Blue
+      "#D55E00", // Vermilion
+      "#009E73", // Bluish green
+      "#CC79A7", // Reddish purple
+      "#E69F00", // Orange
+      "#56B4E9", // Sky blue
+      "#2b5c8f", // Deep slate blue
+      "#8c564b", // Brown
+      "#17becf", // Teal
+      "#7f7f7f", // Neutral grey
+      "#bcbd22"  // Olive
+    ];
+
+    // Mammalian Prestin (N=116) UCSC Assembly -> Species & Taxonomic Order Lookup
+    const PRESTIN_TAXONOMY = {
+      // Cetacea (Dolphins & Whales)
+      "HLturTru3": { name: "Bottlenose dolphin", group: "Cetacea (Whales & Dolphins)" },
+      "HLorcOrc1": { name: "Killer whale", group: "Cetacea (Whales & Dolphins)" },
+      "HLdelLeu1": { name: "Beluga whale", group: "Cetacea (Whales & Dolphins)" },
+      "lipVex1":   { name: "Yangtze river dolphin", group: "Cetacea (Whales & Dolphins)" },
+      "phyCat1":   { name: "Sperm whale", group: "Cetacea (Whales & Dolphins)" },
+      "balAcu1":   { name: "Minke whale", group: "Cetacea (Whales & Dolphins)" },
+      "HLbalMys1": { name: "Bowhead whale", group: "Cetacea (Whales & Dolphins)" },
+      // Echolocating Microbats & Horseshoe Bats
+      "HLrhiSin1": { name: "Chinese horseshoe bat", group: "Chiroptera (Bats)" },
+      "HLhipArm1": { name: "Great roundleaf bat", group: "Chiroptera (Bats)" },
+      "eptFus1":   { name: "Big brown bat", group: "Chiroptera (Bats)" },
+      "myoLuc2":   { name: "Little brown bat", group: "Chiroptera (Bats)" },
+      "myoBra1":   { name: "Brandt's bat", group: "Chiroptera (Bats)" },
+      "myoDav1":   { name: "David's myotis", group: "Chiroptera (Bats)" },
+      "HLminNat1": { name: "Natal long-fingered bat", group: "Chiroptera (Bats)" },
+      "HLdesRot1": { name: "Vampire bat", group: "Chiroptera (Bats)" },
+      "pteAle1":   { name: "Black flying fox (Megabat)", group: "Chiroptera (Bats)" },
+      "HLpteVam2": { name: "Large flying fox (Megabat)", group: "Chiroptera (Bats)" },
+      // Primates
+      "hg38":      { name: "Human", group: "Primates" },
+      "panTro5":   { name: "Chimpanzee", group: "Primates" },
+      "panPan2":   { name: "Bonobo", group: "Primates" },
+      "gorGor5":   { name: "Gorilla", group: "Primates" },
+      "ponAbe2":   { name: "Orangutan", group: "Primates" },
+      "nomLeu3":   { name: "Gibbon", group: "Primates" },
+      "rheMac8":   { name: "Rhesus macaque", group: "Primates" },
+      "macFas5":   { name: "Crab-eating macaque", group: "Primates" },
+      "macNem1":   { name: "Pig-tailed macaque", group: "Primates" },
+      "papAnu3":   { name: "Olive baboon", group: "Primates" },
+      "chlSab2":   { name: "Green monkey", group: "Primates" },
+      "cerAty1":   { name: "Sooty mangabey", group: "Primates" },
+      "manLeu1":   { name: "Drill", group: "Primates" },
+      "colAng1":   { name: "Angolan colobus", group: "Primates" },
+      "HLpilTep1": { name: "Red colobus", group: "Primates" },
+      "nasLar1":   { name: "Proboscis monkey", group: "Primates" },
+      "rhiBie1":   { name: "Black snub-nosed monkey", group: "Primates" },
+      "rhiRox1":   { name: "Golden snub-nosed monkey", group: "Primates" },
+      "calJac3":   { name: "Common marmoset", group: "Primates" },
+      "aotNan1":   { name: "Nancy Ma's night monkey", group: "Primates" },
+      "cebCap1":   { name: "White-faced sapajou", group: "Primates" },
+      "saiBol1":   { name: "Bolivian squirrel monkey", group: "Primates" },
+      "tarSyr2":   { name: "Philippine tarsier", group: "Primates" },
+      "otoGar3":   { name: "Small-eared galago", group: "Primates" },
+      "micMur3":   { name: "Gray mouse lemur", group: "Primates" },
+      "proCoq1":   { name: "Coquerel's sifaka", group: "Primates" },
+      "galVar1":   { name: "Sunda flying lemur", group: "Primates" },
+      // Carnivora
+      "canFam3":   { name: "Domestic dog", group: "Carnivora" },
+      "HLlycPic1": { name: "African wild dog", group: "Carnivora" },
+      "felCat8":   { name: "Domestic cat", group: "Carnivora" },
+      "HLaciJub1": { name: "Cheetah", group: "Carnivora" },
+      "panTig1":   { name: "Amur tiger", group: "Carnivora" },
+      "HLpanPar1": { name: "Leopard", group: "Carnivora" },
+      "ailMel1":   { name: "Giant panda", group: "Carnivora" },
+      "ursMar1":   { name: "Polar bear", group: "Carnivora" },
+      "HLailFul1": { name: "Red panda", group: "Carnivora" },
+      "musFur1":   { name: "Ferret", group: "Carnivora" },
+      "HLenhLut1": { name: "Sea otter", group: "Carnivora" },
+      "odoRosDiv1":{ name: "Pacific walrus", group: "Carnivora" },
+      "lepWed1":   { name: "Weddell seal", group: "Carnivora" },
+      // Ungulates (Artiodactyla & Perissodactyla)
+      "bosTau8":   { name: "Domestic cow", group: "Ungulates" },
+      "HLbosInd1": { name: "Zebu cattle", group: "Ungulates" },
+      "bosMut1":   { name: "Wild yak", group: "Ungulates" },
+      "bisBis1":   { name: "American bison", group: "Ungulates" },
+      "bubBub1":   { name: "Water buffalo", group: "Ungulates" },
+      "HLoviAri4": { name: "Domestic sheep", group: "Ungulates" },
+      "HLoviCan1": { name: "Bighorn sheep", group: "Ungulates" },
+      "HLcapHir2": { name: "Domestic goat", group: "Ungulates" },
+      "panHod1":   { name: "Tibetan antelope", group: "Ungulates" },
+      "HLcerEla1": { name: "Red deer", group: "Ungulates" },
+      "HLodoVir1": { name: "White-tailed deer", group: "Ungulates" },
+      "susScr11":  { name: "Wild boar / Pig", group: "Ungulates" },
+      "vicPac2":   { name: "Alpaca", group: "Ungulates" },
+      "HLcamDro1": { name: "Dromedary camel", group: "Ungulates" },
+      "HLcamBac1": { name: "Bactrian camel", group: "Ungulates" },
+      "HLcamFer2": { name: "Wild Bactrian camel", group: "Ungulates" },
+      "HLequCab3": { name: "Domestic horse", group: "Ungulates" },
+      "equPrz1":   { name: "Przewalski's horse", group: "Ungulates" },
+      "HLequAsi1": { name: "Donkey", group: "Ungulates" },
+      "cerSim1":   { name: "Southern white rhinoceros", group: "Ungulates" },
+      // Rodentia & Lagomorpha
+      "mm10":      { name: "House mouse", group: "Rodentia & Lagomorpha" },
+      "HLmusCar1": { name: "Ryukyu mouse", group: "Rodentia & Lagomorpha" },
+      "HLmusPah1": { name: "Shrew mouse", group: "Rodentia & Lagomorpha" },
+      "rn6":       { name: "Norway rat", group: "Rodentia & Lagomorpha" },
+      "HLmerUng1": { name: "Mongolian gerbil", group: "Rodentia & Lagomorpha" },
+      "criGri1":   { name: "Chinese hamster", group: "Rodentia & Lagomorpha" },
+      "mesAur1":   { name: "Golden hamster", group: "Rodentia & Lagomorpha" },
+      "micOch1":   { name: "Prairie vole", group: "Rodentia & Lagomorpha" },
+      "perManBai1":{ name: "Deer mouse", group: "Rodentia & Lagomorpha" },
+      "nanGal1":   { name: "Blind mole rat", group: "Rodentia & Lagomorpha" },
+      "jacJac1":   { name: "Lesser Egyptian jerboa", group: "Rodentia & Lagomorpha" },
+      "HLcasCan1": { name: "American beaver", group: "Rodentia & Lagomorpha" },
+      "HLdipOrd2": { name: "Ord's kangaroo rat", group: "Rodentia & Lagomorpha" },
+      "speTri2":   { name: "Thirteen-lined ground squirrel", group: "Rodentia & Lagomorpha" },
+      "HLmarMar1": { name: "Alpine marmot", group: "Rodentia & Lagomorpha" },
+      "cavPor3":   { name: "Guinea pig", group: "Rodentia & Lagomorpha" },
+      "chiLan1":   { name: "Long-tailed chinchilla", group: "Rodentia & Lagomorpha" },
+      "octDeg1":   { name: "Degu", group: "Rodentia & Lagomorpha" },
+      "hetGla2":   { name: "Naked mole-rat", group: "Rodentia & Lagomorpha" },
+      "HLfukDam1": { name: "Damaraland mole-rat", group: "Rodentia & Lagomorpha" },
+      "oryCun2":   { name: "European rabbit", group: "Rodentia & Lagomorpha" },
+      "ochPri3":   { name: "American pika", group: "Rodentia & Lagomorpha" },
+      // Afrotheria, Xenarthra, Marsupials & Monotremes
+      "loxAfr3":   { name: "African elephant", group: "Afrotheria & Basal" },
+      "triMan1":   { name: "West Indian manatee", group: "Afrotheria & Basal" },
+      "HLproCap2": { name: "Rock hyrax", group: "Afrotheria & Basal" },
+      "chrAsi1":   { name: "Cape golden mole", group: "Afrotheria & Basal" },
+      "oryAfe1":   { name: "Aardvark", group: "Afrotheria & Basal" },
+      "eleEdw1":   { name: "Cape elephant shrew", group: "Afrotheria & Basal" },
+      "dasNov3":   { name: "Nine-banded armadillo", group: "Afrotheria & Basal" },
+      "HLchoHof2": { name: "Hoffmann's two-toed sloth", group: "Afrotheria & Basal" },
+      "monDom5":   { name: "Gray short-tailed opossum", group: "Afrotheria & Basal" },
+      "sarHar1":   { name: "Tasmanian devil", group: "Afrotheria & Basal" },
+      "HLphaCin1": { name: "Koala", group: "Afrotheria & Basal" },
+      "ornAna2":   { name: "Platypus", group: "Afrotheria & Basal" },
+      "tupChi1":   { name: "Chinese tree shrew", group: "Afrotheria & Basal" },
+      "eriEur2":   { name: "European hedgehog", group: "Laurasiatheria Misc" },
+      "conCri1":   { name: "Star-nosed mole", group: "Laurasiatheria Misc" },
+      "manPen1":   { name: "Chinese pangolin", group: "Laurasiatheria Misc" },
+      "HLmanJav1": { name: "Sunda pangolin", group: "Laurasiatheria Misc" }
+    };
+
+    let wasmEngine = null;
+    let currentResult = null;
+    let treeRoot = null;
+    let focusedSubtreeRoot = null;
+    let allTreeNodes = [];
+    let nodeById = new Map();
+    let collapsedNodeIds = new Set();
+    let layoutMode = 'phylogram'; // 'phylogram' | 'cladogram' | 'circular'
+    let selectedElement = null;   // { type: 'branch'|'node'|'shunt', data: ... }
+    let hoveredElement = null;
+    let searchQuery = '';
+
+    // Camera state for Canvas Pan & Zoom
+    let cam = { x: 40, y: 30, scale: 1.0 };
+    let isDragging = false;
+    let dragStart = { x: 0, y: 0 };
+    let dragMoved = false;
+
+    // Clade group color map
+    let groupColorMap = new Map();
+
+    // -----------------------------------------------------------------------
+    // 1. Initialize WASM & Load Default Preset
+    // -----------------------------------------------------------------------
+    async function boot() {
+      try {
+        await init();
+        wasmEngine = new WasmBushwhacker();
+        const statusEl = document.getElementById('wasmStatus');
+        statusEl.textContent = 'WASM SIMD Ready';
+        statusEl.style.color = 'var(--status-green)';
+        await loadFastaPreset('prestin');
+      } catch (err) {
+        console.error('WASM initialization error:', err);
+        document.getElementById('wasmStatus').textContent = 'WASM Error';
+        document.getElementById('wasmLed').style.backgroundColor = '#b91c1c';
+      }
+    }
+
+    window.switchModeTab = function(tab) {
+      document.getElementById('tabBtnInduce').classList.toggle('active', tab === 'induce');
+      document.getElementById('tabBtnNewick').classList.toggle('active', tab === 'newick');
+      document.getElementById('tabBtnTheory').classList.toggle('active', tab === 'theory');
+
+      if (tab === 'induce') {
+        document.getElementById('panelInduceInput').classList.remove('hidden');
+        document.getElementById('panelNewickInput').classList.add('hidden');
+      } else if (tab === 'newick') {
+        document.getElementById('panelInduceInput').classList.add('hidden');
+        document.getElementById('panelNewickInput').classList.remove('hidden');
+        if (!document.getElementById('newickInput').value.trim() && currentResult) {
+          document.getElementById('newickInput').value = currentResult.newick;
+        }
+      } else if (tab === 'theory') {
+        document.getElementById('panelAuditTables').scrollIntoView({ behavior: 'smooth' });
+      }
+    };
+
+    // -----------------------------------------------------------------------
+    // 2. Preset & Synthetic Benchmark Generators
+    // -----------------------------------------------------------------------
+    function mulberry32(a) {
+      return function() {
+        let t = a += 0x6D2B79F5;
+        t = Math.imul(t ^ (t >>> 15), t | 1);
+        t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+        return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+      };
+    }
+
+    function mutateSeq(seqArr, nMuts, rng) {
+      const bases = ['A', 'C', 'G', 'T'];
+      const out = seqArr.slice();
+      const L = out.length;
+      for (let m = 0; m < nMuts; m++) {
+        const pos = Math.floor(rng() * L);
+        const cur = out[pos];
+        const alt = bases[(bases.indexOf(cur) + 1 + Math.floor(rng() * 3)) % 4];
+        out[pos] = alt;
+      }
+      return out;
+    }
+
+    function generatePolytomyBenchmarkFasta(nTaxa = 64, L = 600) {
+      const rng = mulberry32(20261101);
+      const bases = ['A', 'C', 'G', 'T'];
+      const root = Array.from({ length: L }, () => bases[Math.floor(rng() * 4)]);
+      // 4 major orders radiating from root, each containing a true multifurcating burst (8-way or 10-way star!)
+      const orders = ['RadiationA', 'RadiationB', 'RadiationC', 'RadiationD'];
+      const lines = [];
+      const perOrder = nTaxa / orders.length;
+      for (let o = 0; o < orders.length; o++) {
+        const orderAnc = mutateSeq(root, 14, rng);
+        // Sub-hub 1: 8-way true star polytomy (zero shared internal mutations among the 8 rays)
+        const nStar = Math.floor(perOrder / 2);
+        for (let i = 0; i < nStar; i++) {
+          const leaf = mutateSeq(orderAnc, 6 + Math.floor(rng() * 5), rng);
+          lines.push(`>${orders[o]}_StarBurst_${String(i + 1).padStart(2, '0')}\n${leaf.join('')}`);
+        }
+        // Sub-hub 2: resolved binary subclade within the order
+        let curAnc = mutateSeq(orderAnc, 10, rng);
+        for (let i = nStar; i < perOrder; i += 2) {
+          curAnc = mutateSeq(curAnc, 7, rng);
+          const l1 = mutateSeq(curAnc, 5, rng);
+          const l2 = mutateSeq(curAnc, 5, rng);
+          lines.push(`>${orders[o]}_Crown_${String(i + 1).padStart(2, '0')}\n${l1.join('')}`);
+          if (i + 1 < perOrder) {
+            lines.push(`>${orders[o]}_Crown_${String(i + 2).padStart(2, '0')}\n${l2.join('')}`);
+          }
+        }
+      }
+      return lines.join('\n');
+    }
+
+    function generateHgtMosaicFasta(nTaxa = 24, L = 900) {
+      const rng = mulberry32(987654);
+      const bases = ['A', 'C', 'G', 'T'];
+      const root = Array.from({ length: L }, () => bases[Math.floor(rng() * 4)]);
+      const cladeA = mutateSeq(root, 30, rng);
+      const cladeB = mutateSeq(root, 30, rng);
+      const cladeC = mutateSeq(root, 30, rng);
+
+      const seqs = [];
+      const names = [];
+      const buildClade = (anc, prefix, count) => {
+        let cur = anc.slice();
+        for (let i = 0; i < count; i += 2) {
+          cur = mutateSeq(cur, 10, rng);
+          const s1 = mutateSeq(cur, 6, rng);
+          const s2 = mutateSeq(cur, 6, rng);
+          names.push(`${prefix}_T${i + 1}`);
+          seqs.push(s1);
+          if (i + 1 < count) {
+            names.push(`${prefix}_T${i + 2}`);
+            seqs.push(s2);
+          }
+        }
+      };
+      buildClade(cladeA, 'AlphaLineage', 8);
+      buildClade(cladeB, 'BetaLineage', 8);
+      buildClade(cladeC, 'GammaLineage', 8);
+
+      // Inject a 240 bp horizontal gene transfer (INTERVAL shunt) from AlphaLineage_T1 into GammaLineage_T8 across sites 320..560
+      const donor = seqs[0];
+      const recip = seqs[seqs.length - 1];
+      names[seqs.length - 1] = 'GammaLineage_T8_HGT_Mosaic';
+      for (let s = 320; s < 560; s++) {
+        recip[s] = donor[s];
+      }
+      return names.map((nm, idx) => `>${nm}\n${seqs[idx].join('')}`).join('\n');
+    }
+
+    window.loadFastaPreset = async function(presetId) {
+      document.querySelectorAll('.preset-btn').forEach(b => b.classList.remove('active-preset'));
+      const btn = document.getElementById(`preset_${presetId}`);
+      if (btn) btn.classList.add('active-preset');
+
+      const ta = document.getElementById('fastaInput');
+      if (presetId === 'prestin' || presetId === 'bglobin') {
+        const resp = await fetch(`./examples/${presetId}.fasta`);
+        ta.value = await resp.text();
+        document.getElementById('paramCoding').checked = true;
+        document.getElementById('paramShunts').checked = true;
+      } else if (presetId === 'polytomy') {
+        ta.value = generatePolytomyBenchmarkFasta(64, 600);
+        document.getElementById('paramCoding').checked = false;
+        document.getElementById('paramShunts').checked = true;
+      } else if (presetId === 'hgt') {
+        ta.value = generateHgtMosaicFasta(24, 900);
+        document.getElementById('paramCoding').checked = false;
+        document.getElementById('paramShunts').checked = true;
+      } else if (presetId === 'large512') {
+        ta.value = generatePolytomyBenchmarkFasta(512, 800);
+        document.getElementById('paramCoding').checked = false;
+        document.getElementById('paramShunts').checked = false;
+      }
+      runFastaInduction();
+    };
+
+    // -----------------------------------------------------------------------
+    // 3. Execute Rust WASM MDL Induction
+    // -----------------------------------------------------------------------
+    window.runFastaInduction = function() {
+      if (!wasmEngine) return;
+      const fasta = document.getElementById('fastaInput').value.trim();
+      if (!fasta) return;
+
+      const coding = document.getElementById('paramCoding').checked;
+      const shunts = document.getElementById('paramShunts').checked;
+      const minShunt = parseInt(document.getElementById('paramMinShunt').value, 10) || 2;
+
+      const btn = document.getElementById('runInduceBtn');
+      btn.disabled = true;
+      btn.textContent = 'Inducing MDL Graph...';
+
+      setTimeout(() => {
+        try {
+          const t0 = performance.now();
+          const jsonStr = wasmEngine.infer_fasta(fasta, coding, shunts, minShunt);
+          const elapsedMs = performance.now() - t0;
+
+          currentResult = JSON.parse(jsonStr);
+          currentResult.runtime_ms = elapsedMs;
+          document.getElementById('alignMetaBadge').textContent = `N=${currentResult.n_taxa}, L=${currentResult.n_sites}`;
+          document.getElementById('newickInput').value = currentResult.newick;
+
+          buildTreeFromBushwhackerResult(currentResult);
+          updateDashboardStats();
+          renderAuditTables();
+          fitTreeToScreen();
+          renderBarcodeTrack();
+        } catch (err) {
+          alert('BUSHWHACKER Induction Error: ' + err);
+        } finally {
+          btn.disabled = false;
+          btn.textContent = 'Induce MDL Graph (Rust WASM)';
+        }
+      }, 15);
+    };
+
+    // -----------------------------------------------------------------------
+    // 4. Convert BUSHWHACKER Graph or Arbitrary Newick into Rooted Layout Tree
+    // -----------------------------------------------------------------------
+    function inferTaxonGroup(rawName) {
+      if (PRESTIN_TAXONOMY[rawName]) {
+        return PRESTIN_TAXONOMY[rawName].group;
+      }
+      if (rawName.includes('_')) {
+        return rawName.split('_')[0];
+      }
+      return null;
+    }
+
+    function formatDisplayName(rawName) {
+      const useHuman = document.getElementById('paramHumanLabels')?.checked;
+      if (useHuman && PRESTIN_TAXONOMY[rawName]) {
+        return `${PRESTIN_TAXONOMY[rawName].name} [${rawName}]`;
+      }
+      return rawName;
+    }
+
+    function buildTreeFromBushwhackerResult(res) {
+      collapsedNodeIds.clear();
+      focusedSubtreeRoot = null;
+      selectedElement = null;
+      document.getElementById('subtreeBanner').classList.add('hidden');
+
+      const n = res.n_taxa;
+      const adj = new Map();
+      for (const [k, v] of Object.entries(res.adjacency)) {
+        adj.set(parseInt(k, 10), v);
+      }
+
+      const branchMap = new Map();
+      for (const b of res.branches) {
+        const key = `${Math.min(b.u, b.v)}_${Math.max(b.u, b.v)}`;
+        branchMap.set(key, b);
+      }
+
+      // Pick highest-degree internal node or midpoint-like internal node as root
+      let rootId = n;
+      let bestDeg = -1;
+      for (const [u, nbs] of adj.entries()) {
+        if (u >= n && nbs.length > bestDeg) {
+          bestDeg = nbs.length;
+          rootId = u;
+        }
+      }
+      if (!adj.has(rootId)) rootId = 0;
+
+      nodeById.clear();
+      allTreeNodes = [];
+      const visited = new Set();
+
+      function buildNode(u, parentId) {
+        visited.add(u);
+        const rawLabel = res.node_labels[u] || (u < n ? res.names[u] : `N${u}`);
+        const nbs = adj.get(u) || [];
+        const edgeRec = parentId !== null
+          ? branchMap.get(`${Math.min(u, parentId)}_${Math.max(u, parentId)}`)
+          : null;
+
+        const node = {
+          id: u,
+          parentId,
+          rawLabel,
+          isLeaf: u < n,
+          degree: nbs.length,
+          branchLength: edgeRec ? edgeRec.branch_length : 0.0,
+          mutationCount: edgeRec ? edgeRec.mutation_count : 0.0,
+          mdlGain: edgeRec ? edgeRec.mdl_gain_nats : 0.0,
+          mdlSupport: edgeRec ? edgeRec.mdl_support : 1.0,
+          synSites: edgeRec ? (edgeRec.synapomorphy_sites || []) : [],
+          edgeRecord: edgeRec,
+          children: [],
+          leafCount: u < n ? 1 : 0,
+          cladeGroup: u < n ? inferTaxonGroup(rawLabel) : null
+        };
+
+        nodeById.set(u, node);
+        allTreeNodes.push(node);
+
+        for (const nb of nbs) {
+          if (nb !== parentId && !visited.has(nb)) {
+            const ch = buildNode(nb, u);
+            node.children.push(ch);
+            node.leafCount += ch.leafCount;
+          }
+        }
+
+        // Ladderize children by leafCount for clean visual hierarchy
+        node.children.sort((a, b) => a.leafCount - b.leafCount || a.id - b.id);
+        return node;
+      }
+
+      treeRoot = buildNode(rootId, null);
+      assignCladeRibbonGroups(treeRoot);
+      applyVisualFilters();
+    }
+
+    // Assign clade groups either from known taxonomy/prefixes or automatic depth-based clades
+    function assignCladeRibbonGroups(root) {
+      groupColorMap.clear();
+      let hasExplicitGroups = false;
+      for (const nd of allTreeNodes) {
+        if (nd.isLeaf && nd.cladeGroup) {
+          hasExplicitGroups = true;
+          break;
+        }
+      }
+
+      if (!hasExplicitGroups) {
+        // Partition into automatic topological clades at target depth
+        const targetDepth = parseInt(document.getElementById('paramRibbonDepth')?.value || '3', 10);
+        let cladeCounter = 1;
+        function tagSubtree(nd, groupName) {
+          nd.cladeGroup = groupName;
+          for (const ch of nd.children) tagSubtree(ch, groupName);
+        }
+        function walkDepth(nd, depth) {
+          if (nd.isLeaf) {
+            if (!nd.cladeGroup) nd.cladeGroup = `Clade ${cladeCounter++}`;
+            return;
+          }
+          if (depth >= targetDepth && nd.leafCount >= 3) {
+            tagSubtree(nd, `Clade ${cladeCounter++}`);
+            return;
+          }
+          for (const ch of nd.children) walkDepth(ch, depth + 1);
+        }
+        walkDepth(root, 0);
+      }
+
+      // Propagate unanimous child cladeGroup up to internal nodes
+      function postOrderGroup(nd) {
+        if (nd.isLeaf) return nd.cladeGroup;
+        const childGroups = nd.children.map(postOrderGroup);
+        const first = childGroups[0];
+        if (first && childGroups.every(g => g === first)) {
+          nd.cladeGroup = first;
+          return first;
+        }
+        nd.cladeGroup = null;
+        return null;
+      }
+      postOrderGroup(root);
+
+      const uniqueGroups = [];
+      for (const nd of allTreeNodes) {
+        if (nd.isLeaf && nd.cladeGroup && !uniqueGroups.includes(nd.cladeGroup)) {
+          uniqueGroups.push(nd.cladeGroup);
+        }
+      }
+      uniqueGroups.forEach((g, idx) => {
+        groupColorMap.set(g, CLADE_PALETTE[idx % CLADE_PALETTE.length]);
+      });
+
+      renderLegend();
+    }
+
+    window.applyVisualFilters = function() {
+      if (!treeRoot) return;
+      renderCanvas();
+    };
+
+    // -----------------------------------------------------------------------
+    // 5. Direct Newick Parser & Big-Tree Generator (Tab 2)
+    // -----------------------------------------------------------------------
+    function parseNewickToTree(nwkStr, zeroEps = 1e-5) {
+      const s = nwkStr.trim().replace(/;\s*$/, '');
+      let pos = 0;
+      let nextId = 100000;
+
+      function parseSub(parentId) {
+        const node = {
+          id: 0,
+          parentId,
+          rawLabel: '',
+          isLeaf: false,
+          degree: 0,
+          branchLength: 0.0,
+          mutationCount: 0.0,
+          mdlGain: 5.0,
+          mdlSupport: 1.0,
+          synSites: [],
+          edgeRecord: null,
+          children: [],
+          leafCount: 0,
+          cladeGroup: null
+        };
+
+        if (s[pos] === '(') {
+          pos++; // '('
+          while (pos < s.length) {
+            const ch = parseSub( -1 );
+            node.children.push(ch);
+            if (s[pos] === ',') {
+              pos++;
+            } else if (s[pos] === ')') {
+              pos++;
+              break;
+            } else {
+              break;
+            }
+          }
+        }
+
+        // Parse label/support and ':branchLength'
+        let token = '';
+        while (pos < s.length && s[pos] !== ',' && s[pos] !== ')' && s[pos] !== ':') {
+          token += s[pos++];
+        }
+        token = token.trim().replace(/^['"]|['"]$/g, '');
+
+        if (s[pos] === ':') {
+          pos++;
+          let blStr = '';
+          while (pos < s.length && s[pos] !== ',' && s[pos] !== ')') {
+            blStr += s[pos++];
+          }
+          const bl = parseFloat(blStr);
+          node.branchLength = isFinite(bl) ? Math.max(0, bl) : 0.0;
+        }
+
+        if (node.children.length === 0) {
+          node.isLeaf = true;
+          node.rawLabel = token || `Tip_${nextId}`;
+        } else {
+          const sup = parseFloat(token);
+          if (isFinite(sup)) {
+            node.mdlSupport = sup > 1.0 ? sup / 100.0 : sup;
+            node.mdlGain = Math.log(Math.max(1e-4, node.mdlSupport) / Math.max(1e-4, 1.0 - node.mdlSupport));
+          }
+          node.rawLabel = token && !isFinite(sup) ? token : '';
+        }
+        return node;
+      }
+
+      const rawRoot = parseSub(null);
+
+      // Collapse near-zero internal branches (<= zeroEps) into explicit polytomy hubs!
+      function collapseZeroBranches(nd) {
+        const newChildren = [];
+        for (const ch of nd.children) {
+          collapseZeroBranches(ch);
+          if (!ch.isLeaf && ch.branchLength <= zeroEps) {
+            for (const gch of ch.children) {
+              newChildren.push(gch);
+            }
+          } else {
+            newChildren.push(ch);
+          }
+        }
+        nd.children = newChildren;
+      }
+      collapseZeroBranches(rawRoot);
+
+      // Number leaves 0..N-1 and internal nodes N..
+      let leafIdx = 0;
+      allTreeNodes = [];
+      nodeById.clear();
+
+      function finalize(nd, pId) {
+        allTreeNodes.push(nd);
+        if (nd.isLeaf) {
+          nd.id = leafIdx++;
+          nd.leafCount = 1;
+          nd.degree = 1;
+          nd.cladeGroup = inferTaxonGroup(nd.rawLabel);
+        } else {
+          nd.id = nextId++;
+          nd.leafCount = 0;
+          for (const ch of nd.children) {
+            finalize(ch, nd.id);
+            nd.leafCount += ch.leafCount;
+          }
+          nd.degree = nd.children.length + (pId !== null ? 1 : 0);
+          nd.children.sort((a, b) => a.leafCount - b.leafCount);
+        }
+        nd.parentId = pId;
+        if (!nd.rawLabel) nd.rawLabel = `N${nd.id}`;
+        nodeById.set(nd.id, nd);
+      }
+      finalize(rawRoot, null);
+      return { root: rawRoot, nTaxa: leafIdx };
+    }
+
+    window.loadCustomNewick = function() {
+      const nwk = document.getElementById('newickInput').value.trim();
+      if (!nwk) return;
+      const eps = parseFloat(document.getElementById('paramZeroEps').value) || 0.0;
+      const t0 = performance.now();
+      const { root, nTaxa } = parseNewickToTree(nwk, eps);
+      const elapsed = performance.now() - t0;
+
+      treeRoot = root;
+      focusedSubtreeRoot = null;
+      collapsedNodeIds.clear();
+      assignCladeRibbonGroups(treeRoot);
+
+      let nInt = 0;
+      let nPoly = 0;
+      let maxDeg = 3;
+      for (const nd of allTreeNodes) {
+        if (!nd.isLeaf) {
+          if (nd.parentId !== null) nInt++;
+          if (nd.degree >= 4) {
+            nPoly++;
+            if (nd.degree > maxDeg) maxDeg = nd.degree;
+          }
+        }
+      }
+
+      currentResult = {
+        n_taxa: nTaxa,
+        n_sites: 1000,
+        l_eff: 1000,
+        newick: nwk,
+        n_internal_branches: nInt,
+        max_binary_internal_branches: Math.max(0, nTaxa - 3),
+        polytomy_nodes: nPoly,
+        max_polytomy_degree: maxDeg,
+        star_tree_nats: 0,
+        full_graph_nats: 0,
+        shunts: [],
+        branches: [],
+        site_weights: [],
+        runtime_ms: elapsed
+      };
+
+      updateDashboardStats();
+      renderAuditTables();
+      fitTreeToScreen();
+      renderBarcodeTrack();
+    };
+
+    window.loadSyntheticNewick = function(nTips) {
+      const rng = mulberry32(nTips * 1337);
+      const orders = ['Cetacea', 'Chiroptera', 'Primates', 'Carnivora', 'Rodentia', 'Ungulata', 'Afrotheria', 'Xenarthra'];
+      function buildCladeStr(count, depth, orderName) {
+        if (count === 1) {
+          const id = Math.floor(rng() * 90000 + 10000);
+          return `${orderName}_${id}:${(0.004 + rng() * 0.035).toFixed(5)}`;
+        }
+        // Create occasional true polytomies (4- to 6-way bursts)
+        const kWay = (count >= 6 && rng() < 0.35) ? Math.min(count, 4 + Math.floor(rng() * 3)) : 2;
+        const parts = [];
+        let rem = count;
+        for (let i = 0; i < kWay; i++) {
+          const take = (i === kWay - 1) ? rem : Math.max(1, Math.floor(rem / (kWay - i)));
+          rem -= take;
+          const subOrder = depth === 0 ? orders[i % orders.length] : orderName;
+          parts.push(buildCladeStr(take, depth + 1, subOrder));
+        }
+        const sup = (0.75 + rng() * 0.25).toFixed(3);
+        const bl = (0.003 + rng() * 0.025).toFixed(5);
+        return `(${parts.join(',')})${sup}:${bl}`;
+      }
+      const nwk = buildCladeStr(nTips, 0, 'Clade') + ';';
+      document.getElementById('newickInput').value = nwk;
+      loadCustomNewick();
+    };
+
+    // -----------------------------------------------------------------------
+    // 6. High-Performance Canvas Layout & Rendering Engine (BigTreeViewer Style)
+    // -----------------------------------------------------------------------
+    function computeTreeLayout() {
+      const activeRoot = focusedSubtreeRoot || treeRoot;
+      if (!activeRoot) return { visibleNodes: [], visibleLeaves: [], maxX: 1, maxY: 1 };
+
+      const visibleNodes = [];
+      const visibleLeaves = [];
+      let leafCursor = 0;
+
+      function traverse(nd, depth, cumBranchLen) {
+        nd._depth = depth;
+        nd._cumLen = cumBranchLen;
+        nd._isCollapsed = collapsedNodeIds.has(nd.id);
+        visibleNodes.push(nd);
+
+        if (nd.isLeaf || nd._isCollapsed || nd.children.length === 0) {
+          nd._y = leafCursor;
+          nd._minY = leafCursor;
+          nd._maxY = leafCursor;
+          visibleLeaves.push(nd);
+          leafCursor += 1;
+          return;
+        }
+
+        let sumY = 0;
+        let minY = Infinity;
+        let maxY = -Infinity;
+        for (const ch of nd.children) {
+          const bl = Math.max(0, ch.branchLength || 0);
+          traverse(ch, depth + 1, cumBranchLen + bl);
+          sumY += ch._y;
+          if (ch._minY < minY) minY = ch._minY;
+          if (ch._maxY > maxY) maxY = ch._maxY;
+        }
+        nd._y = sumY / nd.children.length;
+        nd._minY = minY;
+        nd._maxY = maxY;
+      }
+
+      traverse(activeRoot, 0, 0);
+
+      let maxDepth = 1;
+      let maxCumLen = 1e-6;
+      for (const nd of visibleNodes) {
+        if (nd._depth > maxDepth) maxDepth = nd._depth;
+        if (nd._cumLen > maxCumLen) maxCumLen = nd._cumLen;
+      }
+
+      // Normalize X in [0, 1]
+      for (const nd of visibleNodes) {
+        if (layoutMode === 'cladogram') {
+          nd._normX = nd.isLeaf ? 1.0 : (nd._depth / maxDepth);
+        } else {
+          nd._normX = nd._cumLen / maxCumLen;
+        }
+      }
+
+      return {
+        root: activeRoot,
+        visibleNodes,
+        visibleLeaves,
+        nVisibleLeaves: Math.max(1, visibleLeaves.length),
+        maxDepth,
+        maxCumLen
+      };
+    }
+
+    function getBranchColor(nd) {
+      const mode = document.getElementById('selColorMode').value;
+      if (mode === 'clade') {
+        if (nd.cladeGroup && groupColorMap.has(nd.cladeGroup)) {
+          return groupColorMap.get(nd.cladeGroup);
+        }
+        return '#383632';
+      } else if (mode === 'support') {
+        if (nd.isLeaf) return '#585651';
+        const p = nd.mdlSupport ?? 1.0;
+        if (p >= 0.95) return '#15803d';
+        if (p >= 0.80) return '#0369a1';
+        if (p >= 0.60) return '#d97706';
+        return '#b91c1c';
+      } else if (mode === 'mutations') {
+        const m = nd.mutationCount || 0;
+        if (m >= 25) return '#b91c1c';
+        if (m >= 10) return '#ea580c';
+        if (m >= 3) return '#0369a1';
+        return '#475569';
+      } else if (mode === 'regime') {
+        if (!nd.isLeaf && nd.degree >= 4) return '#d97706';
+        return nd.isLeaf ? '#585651' : '#15803d';
+      }
+      return '#222220';
+    }
+
+    window.setLayoutMode = function(mode) {
+      layoutMode = mode;
+      document.getElementById('btnLayoutPhylogram').classList.toggle('active', mode === 'phylogram');
+      document.getElementById('btnLayoutCladogram').classList.toggle('active', mode === 'cladogram');
+      document.getElementById('btnLayoutCircular').classList.toggle('active', mode === 'circular');
+      fitTreeToScreen();
+    };
+
+    window.fitTreeToScreen = function() {
+      const canvas = document.getElementById('treeCanvas');
+      const rect = canvas.getBoundingClientRect();
+      const layout = computeTreeLayout();
+      const nLeaves = layout.nVisibleLeaves;
+
+      if (layoutMode === 'circular') {
+        cam.scale = 1.0;
+        cam.x = rect.width * 0.5;
+        cam.y = rect.height * 0.5;
+      } else {
+        const rowH = Math.max(2.2, Math.min(18, (rect.height - 60) / nLeaves));
+        const treeH = nLeaves * rowH;
+        cam.scale = 1.0;
+        cam._rowH = rowH;
+        cam._treeW = Math.max(240, rect.width - 340);
+        cam.x = 36;
+        cam.y = Math.max(24, (rect.height - treeH) * 0.5);
+      }
+      renderCanvas();
+    };
+
+    window.zoomBy = function(factor, centerX = null, centerY = null) {
+      const canvas = document.getElementById('treeCanvas');
+      const rect = canvas.getBoundingClientRect();
+      const cx = centerX !== null ? centerX : rect.width * 0.5;
+      const cy = centerY !== null ? centerY : rect.height * 0.5;
+
+      const newScale = Math.max(0.15, Math.min(45.0, cam.scale * factor));
+      const ratio = newScale / cam.scale;
+      cam.x = cx - (cx - cam.x) * ratio;
+      cam.y = cy - (cy - cam.y) * ratio;
+      cam.scale = newScale;
+      renderCanvas();
+    };
+
+    window.renderCanvas = function() {
+      const canvas = document.getElementById('treeCanvas');
+      if (!canvas) return;
+      const dpr = window.devicePixelRatio || 1;
+      const rect = canvas.getBoundingClientRect();
+      if (canvas.width !== Math.floor(rect.width * dpr) || canvas.height !== Math.floor(rect.height * dpr)) {
+        canvas.width = Math.floor(rect.width * dpr);
+        canvas.height = Math.floor(rect.height * dpr);
+      }
+
+      const ctx = canvas.getContext('2d');
+      ctx.save();
+      ctx.scale(dpr, dpr);
+      ctx.clearRect(0, 0, rect.width, rect.height);
+
+      const layout = computeTreeLayout();
+      if (layout.visibleNodes.length === 0) {
+        ctx.restore();
+        return;
+      }
+
+      const showRibbons = document.getElementById('chkShowRibbons').checked;
+      const showPolyBadges = document.getElementById('chkShowPolytomyBadges').checked;
+      const showShunts = document.getElementById('chkShowShunts').checked;
+      const autoLOD = document.getElementById('chkAutoLOD').checked;
+      const baseFontSize = parseInt(document.getElementById('paramFontSize').value, 10) || 11;
+      const baseStroke = parseFloat(document.getElementById('paramStrokeWidth').value) || 1.6;
+      const minSupport = parseFloat(document.getElementById('paramMinSupport').value) || 0.0;
+
+      if (layoutMode === 'circular') {
+        renderCircularTree(ctx, rect, layout, {
+          showRibbons, showPolyBadges, showShunts, autoLOD, baseFontSize, baseStroke, minSupport
+        });
+      } else {
+        renderRectangularTree(ctx, rect, layout, {
+          showRibbons, showPolyBadges, showShunts, autoLOD, baseFontSize, baseStroke, minSupport
+        });
+      }
+
+      ctx.restore();
+      renderMinimap(layout);
+    };
+
+    function renderRectangularTree(ctx, rect, layout, opts) {
+      const baseRowH = cam._rowH || Math.max(2.2, Math.min(18, (rect.height - 60) / layout.nVisibleLeaves));
+      const baseTreeW = cam._treeW || Math.max(260, rect.width - 340);
+      const rowH = baseRowH * cam.scale;
+      const treeW = baseTreeW * cam.scale;
+
+      // Map every visible node to screen coordinates (_sx, _sy)
+      for (const nd of layout.visibleNodes) {
+        nd._sx = cam.x + nd._normX * treeW;
+        nd._sy = cam.y + nd._y * rowH;
+      }
+
+      // 1. Draw Clade Ribbons on the right side
+      const maxTipX = cam.x + treeW;
+      const labelPad = 175;
+      const ribbonX = maxTipX + labelPad;
+
+      if (opts.showRibbons && groupColorMap.size > 0) {
+        // Group contiguous leaf runs by cladeGroup
+        let runStart = 0;
+        const leaves = layout.visibleLeaves;
+        while (runStart < leaves.length) {
+          const grp = leaves[runStart].cladeGroup;
+          let runEnd = runStart;
+          while (runEnd + 1 < leaves.length && leaves[runEnd + 1].cladeGroup === grp) {
+            runEnd++;
+          }
+          if (grp && groupColorMap.has(grp)) {
+            const y0 = leaves[runStart]._sy - Math.min(7, rowH * 0.42);
+            const y1 = leaves[runEnd]._sy + Math.min(7, rowH * 0.42);
+            if (y1 >= -20 && y0 <= rect.height + 20) {
+              const col = groupColorMap.get(grp);
+              // Subtle background band across tips
+              ctx.fillStyle = col + '12';
+              ctx.fillRect(maxTipX, y0, labelPad + 16, Math.max(2, y1 - y0));
+
+              // Outer ribbon bar
+              ctx.fillStyle = col;
+              ctx.fillRect(ribbonX, y0, 6, Math.max(2, y1 - y0));
+
+              if (y1 - y0 >= 13) {
+                ctx.fillStyle = col;
+                ctx.font = `700 ${Math.min(11.5, opts.baseFontSize)}px -apple-system, sans-serif`;
+                ctx.textBaseline = 'middle';
+                ctx.fillText(grp, ribbonX + 11, 0.5 * (y0 + y1));
+              }
+            }
+          }
+          runStart = runEnd + 1;
+        }
+      }
+
+      // 2. Draw Tree Branches (with frustum culling)
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+
+      for (const nd of layout.visibleNodes) {
+        if (nd === layout.root) continue;
+        const p = nodeById.get(nd.parentId);
+        if (!p) continue;
+
+        const x0 = p._sx;
+        const y0 = p._sy;
+        const x1 = nd._sx;
+        const y1 = nd._sy;
+
+        if (Math.max(y0, y1) < -20 || Math.min(y0, y1) > rect.height + 20) continue;
+        if (Math.max(x0, x1) < -20 || Math.min(x0, x1) > rect.width + 20) continue;
+
+        const isSelected = selectedElement && selectedElement.type === 'branch' && selectedElement.data.id === nd.id;
+        const isHovered = hoveredElement && hoveredElement.type === 'branch' && hoveredElement.data.id === nd.id;
+        const lowSupport = !nd.isLeaf && (nd.mdlSupport ?? 1.0) < opts.minSupport;
+
+        ctx.strokeStyle = isSelected ? '#ff4f00' : (isHovered ? '#111111' : getBranchColor(nd));
+        ctx.lineWidth = isSelected ? opts.baseStroke + 1.8 : (isHovered ? opts.baseStroke + 1.0 : opts.baseStroke);
+        if (lowSupport) ctx.setLineDash([3, 3]);
+        else ctx.setLineDash([]);
+
+        ctx.beginPath();
+        ctx.moveTo(x0, y0);
+        ctx.lineTo(x0, y1);
+        ctx.lineTo(x1, y1);
+        ctx.stroke();
+      }
+      ctx.setLineDash([]);
+
+      // 3. Draw Reticulate Shunt Bezier Arcs (SPARSE & INTERVAL)
+      if (opts.showShunts && currentResult && currentResult.shunts) {
+        for (const sh of currentResult.shunts) {
+          const nu = nodeById.get(sh.node_u);
+          const nv = nodeById.get(sh.node_v);
+          if (!nu || !nv || nu._sx === undefined || nv._sx === undefined) continue;
+
+          const x1 = nu._sx, y1 = nu._sy;
+          const x2 = nv._sx, y2 = nv._sy;
+          const midX = Math.max(x1, x2) + 45 + 0.18 * Math.abs(y2 - y1);
+          const midY = 0.5 * (y1 + y2);
+
+          const isSparse = sh.mode === 'SPARSE';
+          ctx.save();
+          ctx.strokeStyle = isSparse ? '#ff4f00' : '#0369a1';
+          ctx.lineWidth = 2.2;
+          ctx.setLineDash(isSparse ? [5, 4] : [9, 3]);
+          ctx.beginPath();
+          ctx.moveTo(x1, y1);
+          ctx.quadraticCurveTo(midX, midY, x2, y2);
+          ctx.stroke();
+
+          // Shunt midpoint pill
+          const bx = 0.25 * x1 + 0.5 * midX + 0.25 * x2;
+          const by = 0.25 * y1 + 0.5 * midY + 0.25 * y2;
+          sh._bx = bx;
+          sh._by = by;
+          ctx.setLineDash([]);
+          ctx.fillStyle = isSparse ? '#ff4f00' : '#0369a1';
+          ctx.beginPath();
+          ctx.arc(bx, by, 5.5, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.restore();
+        }
+      }
+
+      // 4. Draw Polytomy Hub Badges, Collapsed Clade Wedges, and Tip Labels
+      const labelStep = opts.autoLOD ? Math.max(1, Math.ceil(11 / Math.max(0.5, rowH))) : 1;
+      const qLower = searchQuery.toLowerCase();
+
+      for (let i = 0; i < layout.visibleNodes.length; i++) {
+        const nd = layout.visibleNodes[i];
+        const x = nd._sx;
+        const y = nd._sy;
+        if (y < -20 || y > rect.height + 20) continue;
+
+        if (nd._isCollapsed) {
+          // Draw proportional collapsed triangle wedge
+          const w = 28;
+          const h = Math.max(6, Math.min(18, Math.log2(nd.leafCount + 1) * 4));
+          const col = getBranchColor(nd);
+          ctx.fillStyle = col + '33';
+          ctx.strokeStyle = col;
+          ctx.lineWidth = 1.4;
+          ctx.beginPath();
+          ctx.moveTo(x, y);
+          ctx.lineTo(x + w, y - h);
+          ctx.lineTo(x + w, y + h);
+          ctx.closePath();
+          ctx.fill();
+          ctx.stroke();
+
+          ctx.fillStyle = '#121212';
+          ctx.font = `700 ${opts.baseFontSize}px ui-monospace, monospace`;
+          ctx.textBaseline = 'middle';
+          ctx.fillText(`▲ ${nd.cladeGroup || nd.rawLabel} (${nd.leafCount} tips)`, x + w + 6, y);
+          continue;
+        }
+
+        // Polytomy Hub Badge (degree >= 4)
+        if (!nd.isLeaf && nd.degree >= 4 && opts.showPolyBadges) {
+          ctx.save();
+          ctx.fillStyle = '#fffbeb';
+          ctx.strokeStyle = '#d97706';
+          ctx.lineWidth = 1.8;
+          ctx.beginPath();
+          ctx.moveTo(x, y - 5.5);
+          ctx.lineTo(x + 5.5, y);
+          ctx.lineTo(x, y + 5.5);
+          ctx.lineTo(x - 5.5, y);
+          ctx.closePath();
+          ctx.fill();
+          ctx.stroke();
+          if (rowH >= 7) {
+            ctx.fillStyle = '#b45309';
+            ctx.font = '700 9.5px ui-monospace, monospace';
+            ctx.textBaseline = 'bottom';
+            ctx.fillText(`${nd.degree}-way`, x + 6, y - 2);
+          }
+          ctx.restore();
+        }
+      }
+
+      // Draw Leaf Labels with Semantic LOD & Search Highlight
+      ctx.font = `500 ${opts.baseFontSize}px ui-monospace, SFMono-Regular, monospace`;
+      ctx.textBaseline = 'middle';
+
+      for (let idx = 0; idx < layout.visibleLeaves.length; idx++) {
+        const lf = layout.visibleLeaves[idx];
+        if (lf._isCollapsed) continue;
+        const x = lf._sx;
+        const y = lf._sy;
+        if (y < -15 || y > rect.height + 15) continue;
+
+        const disp = formatDisplayName(lf.rawLabel);
+        const isMatch = qLower && (disp.toLowerCase().includes(qLower) || (lf.cladeGroup && lf.cladeGroup.toLowerCase().includes(qLower)));
+
+        if (!isMatch && (idx % labelStep !== 0)) continue;
+
+        // Guide leader line to align with clade ribbon if phylogram
+        if (opts.showRibbons && x < maxTipX - 2) {
+          ctx.strokeStyle = 'rgba(156, 154, 148, 0.25)';
+          ctx.lineWidth = 0.7;
+          ctx.setLineDash([2, 2]);
+          ctx.beginPath();
+          ctx.moveTo(x + 3, y);
+          ctx.lineTo(maxTipX, y);
+          ctx.stroke();
+          ctx.setLineDash([]);
+        }
+
+        if (isMatch) {
+          ctx.fillStyle = '#ff4f00';
+          ctx.font = `700 ${opts.baseFontSize + 1}px ui-monospace, monospace`;
+          ctx.beginPath();
+          ctx.arc(x, y, 4, 0, Math.PI * 2);
+          ctx.fill();
+        } else {
+          ctx.fillStyle = '#1f1e1b';
+          ctx.font = `500 ${opts.baseFontSize}px ui-monospace, monospace`;
+        }
+        ctx.fillText(disp, x + 6, y);
+      }
+    }
+
+    function renderCircularTree(ctx, rect, layout, opts) {
+      const cx = cam.x;
+      const cy = cam.y;
+      const maxR = Math.min(rect.width, rect.height) * 0.37 * cam.scale;
+      const nLeaves = layout.nVisibleLeaves;
+      const angleSpan = Math.PI * 1.92;
+      const startAngle = -Math.PI * 0.96;
+
+      for (const nd of layout.visibleNodes) {
+        const theta = startAngle + (nd._y / Math.max(1, nLeaves - 1)) * angleSpan;
+        const r = nd._normX * maxR;
+        nd._theta = theta;
+        nd._r = r;
+        nd._sx = cx + r * Math.cos(theta);
+        nd._sy = cy + r * Math.sin(theta);
+      }
+
+      // 1. Draw Circular Clade Ribbons
+      const ribbonR = maxR + 95 * Math.min(1.2, Math.sqrt(cam.scale));
+      if (opts.showRibbons && groupColorMap.size > 0) {
+        const leaves = layout.visibleLeaves;
+        let runStart = 0;
+        while (runStart < leaves.length) {
+          const grp = leaves[runStart].cladeGroup;
+          let runEnd = runStart;
+          while (runEnd + 1 < leaves.length && leaves[runEnd + 1].cladeGroup === grp) {
+            runEnd++;
+          }
+          if (grp && groupColorMap.has(grp)) {
+            const a0 = leaves[runStart]._theta - 0.5 * (angleSpan / nLeaves);
+            const a1 = leaves[runEnd]._theta + 0.5 * (angleSpan / nLeaves);
+            const col = groupColorMap.get(grp);
+            ctx.strokeStyle = col;
+            ctx.lineWidth = 6;
+            ctx.beginPath();
+            ctx.arc(cx, cy, ribbonR, a0, a1);
+            ctx.stroke();
+          }
+          runStart = runEnd + 1;
+        }
+      }
+
+      // 2. Draw Circular Branches (Arc + Radial Segment)
+      for (const nd of layout.visibleNodes) {
+        if (nd === layout.root) continue;
+        const p = nodeById.get(nd.parentId);
+        if (!p) continue;
+
+        ctx.strokeStyle = getBranchColor(nd);
+        ctx.lineWidth = opts.baseStroke;
+
+        ctx.beginPath();
+        const a0 = p._theta;
+        const a1 = nd._theta;
+        ctx.arc(cx, cy, p._r, Math.min(a0, a1), Math.max(a0, a1));
+        ctx.stroke();
+
+        ctx.beginPath();
+        ctx.moveTo(cx + p._r * Math.cos(a1), cy + p._r * Math.sin(a1));
+        ctx.lineTo(nd._sx, nd._sy);
+        ctx.stroke();
+      }
+
+      // 3. Draw Shunt Chords across the Circle
+      if (opts.showShunts && currentResult && currentResult.shunts) {
+        for (const sh of currentResult.shunts) {
+          const nu = nodeById.get(sh.node_u);
+          const nv = nodeById.get(sh.node_v);
+          if (!nu || !nv) continue;
+          const isSparse = sh.mode === 'SPARSE';
+          ctx.save();
+          ctx.strokeStyle = isSparse ? '#ff4f00' : '#0369a1';
+          ctx.lineWidth = 2.2;
+          ctx.setLineDash(isSparse ? [5, 4] : [9, 3]);
+          ctx.beginPath();
+          ctx.moveTo(nu._sx, nu._sy);
+          ctx.quadraticCurveTo(cx, cy, nv._sx, nv._sy);
+          ctx.stroke();
+          sh._bx = 0.25 * nu._sx + 0.5 * cx + 0.25 * nv._sx;
+          sh._by = 0.25 * nu._sy + 0.5 * cy + 0.25 * nv._sy;
+          ctx.restore();
+        }
+      }
+
+      // 4. Radial Tip Labels
+      const arcPerLeaf = (2 * Math.PI * maxR) / nLeaves;
+      const labelStep = opts.autoLOD ? Math.max(1, Math.ceil(11 / Math.max(0.5, arcPerLeaf))) : 1;
+      const qLower = searchQuery.toLowerCase();
+
+      for (let i = 0; i < layout.visibleLeaves.length; i++) {
+        const lf = layout.visibleLeaves[i];
+        const disp = formatDisplayName(lf.rawLabel);
+        const isMatch = qLower && disp.toLowerCase().includes(qLower);
+        if (!isMatch && (i % labelStep !== 0)) continue;
+
+        ctx.save();
+        ctx.translate(lf._sx, lf._sy);
+        const ang = lf._theta;
+        const flip = ang > Math.PI * 0.5 || ang < -Math.PI * 0.5;
+        ctx.rotate(flip ? ang + Math.PI : ang);
+        ctx.textAlign = flip ? 'right' : 'left';
+        ctx.textBaseline = 'middle';
+        ctx.fillStyle = isMatch ? '#ff4f00' : '#1f1e1b';
+        ctx.font = `${isMatch ? 700 : 500} ${opts.baseFontSize - 1}px ui-monospace, monospace`;
+        ctx.fillText(disp, flip ? -6 : 6, 0);
+        ctx.restore();
+      }
+    }
+
+    function renderMinimap(layout) {
+      const mCanvas = document.getElementById('minimapCanvas');
+      if (!mCanvas) return;
+      const ctx = mCanvas.getContext('2d');
+      const W = mCanvas.width;
+      const H = mCanvas.height;
+      ctx.clearRect(0, 0, W, H);
+
+      if (layout.visibleNodes.length === 0) return;
+      const pad = 12;
+      const nLeaves = Math.max(1, layout.nVisibleLeaves);
+
+      ctx.strokeStyle = '#8a8882';
+      ctx.lineWidth = 0.8;
+      ctx.beginPath();
+      for (const nd of layout.visibleNodes) {
+        if (nd === layout.root) continue;
+        const p = nodeById.get(nd.parentId);
+        if (!p) continue;
+        const x0 = pad + p._normX * (W - 2 * pad);
+        const y0 = pad + (p._y / nLeaves) * (H - 2 * pad);
+        const x1 = pad + nd._normX * (W - 2 * pad);
+        const y1 = pad + (nd._y / nLeaves) * (H - 2 * pad);
+        ctx.moveTo(x0, y0);
+        ctx.lineTo(x0, y1);
+        ctx.lineTo(x1, y1);
+      }
+      ctx.stroke();
+
+      // Viewport indicator box
+      ctx.strokeStyle = '#ff4f00';
+      ctx.lineWidth = 1.2;
+      const vw = Math.min(W - 4, (W - 2 * pad) / Math.max(1, cam.scale));
+      const vh = Math.min(H - 4, (H - 2 * pad) / Math.max(1, cam.scale));
+      ctx.strokeRect(pad, pad, vw, vh);
+    }
+
+    // -----------------------------------------------------------------------
+    // 7. Canvas Mouse / Wheel Interaction & Hit-Testing
+    // -----------------------------------------------------------------------
+    function hitTestCanvas(mx, my) {
+      const layout = computeTreeLayout();
+      // 1. Check shunt badges first
+      if (currentResult && currentResult.shunts) {
+        for (const sh of currentResult.shunts) {
+          if (sh._bx !== undefined && Math.hypot(mx - sh._bx, my - sh._by) <= 9) {
+            return { type: 'shunt', data: sh };
+          }
+        }
+      }
+      // 2. Check nodes / branches
+      let bestNode = null;
+      let bestDist = 10.0;
+      for (const nd of layout.visibleNodes) {
+        if (nd._sx === undefined) continue;
+        const d = Math.hypot(mx - nd._sx, my - nd._sy);
+        if (d < bestDist) {
+          bestDist = d;
+          bestNode = nd;
+        }
+      }
+      if (bestNode) {
+        return { type: 'branch', data: bestNode };
+      }
+      return null;
+    }
+
+    function setupCanvasEvents() {
+      const canvas = document.getElementById('treeCanvas');
+      const tooltip = document.getElementById('canvasTooltip');
+
+      canvas.addEventListener('wheel', (e) => {
+        e.preventDefault();
+        const rect = canvas.getBoundingClientRect();
+        const mx = e.clientX - rect.left;
+        const my = e.clientY - rect.top;
+        const factor = e.deltaY < 0 ? 1.14 : 0.88;
+        zoomBy(factor, mx, my);
+      }, { passive: false });
+
+      canvas.addEventListener('mousedown', (e) => {
+        isDragging = true;
+        dragMoved = false;
+        dragStart = { x: e.clientX - cam.x, y: e.clientY - cam.y };
+      });
+
+      window.addEventListener('mousemove', (e) => {
+        const rect = canvas.getBoundingClientRect();
+        const mx = e.clientX - rect.left;
+        const my = e.clientY - rect.top;
+
+        if (isDragging) {
+          if (Math.hypot(e.clientX - dragStart.x - cam.x, e.clientY - dragStart.y - cam.y) > 3) {
+            dragMoved = true;
+          }
+          cam.x = e.clientX - dragStart.x;
+          cam.y = e.clientY - dragStart.y;
+          renderCanvas();
+          return;
+        }
+
+        if (mx < 0 || my < 0 || mx > rect.width || my > rect.height) {
+          tooltip.classList.add('hidden');
+          return;
+        }
+
+        const hit = hitTestCanvas(mx, my);
+        hoveredElement = hit;
+        if (hit) {
+          tooltip.classList.remove('hidden');
+          tooltip.style.left = `${Math.min(rect.width - 280, mx + 14)}px`;
+          tooltip.style.top = `${Math.max(10, my - 10)}px`;
+          if (hit.type === 'shunt') {
+            const sh = hit.data;
+            tooltip.innerHTML = `
+              <strong>${sh.mode} RETICULATE SHUNT</strong><br>
+              Endpoints: ${sh.label_u} &harr; ${sh.label_v}<br>
+              Net MDL Gain: <strong>+${sh.net_mdl_gain_nats.toFixed(2)} nats</strong> (P = ${(sh.posterior_prob * 100).toFixed(1)}%)<br>
+              Shared Mutations: ${sh.shared_mutations} sites
+            `;
+          } else {
+            const nd = hit.data;
+            const kind = nd.isLeaf
+              ? 'Terminal Taxon'
+              : (nd.degree >= 4 ? `Polytomy Hub (${nd.degree}-way radiation)` : `Internal Clade (${nd.leafCount} tips)`);
+            tooltip.innerHTML = `
+              <strong>${formatDisplayName(nd.rawLabel)}</strong><br>
+              Type: ${kind}<br>
+              ${nd.cladeGroup ? `Group: ${nd.cladeGroup}<br>` : ''}
+              Mutations: m = ${nd.mutationCount.toFixed(1)} (bl = ${nd.branchLength.toFixed(5)})<br>
+              ${!nd.isLeaf ? `MDL Gain: ${nd.mdlGain.toFixed(2)} nats (P = ${(nd.mdlSupport * 100).toFixed(1)}%)<br><em>Click to collapse/expand &bull; Shift+Click to isolate</em>` : ''}
+            `;
+          }
+          renderCanvas();
+        } else {
+          tooltip.classList.add('hidden');
+        }
+      });
+
+      window.addEventListener('mouseup', (e) => {
+        if (!isDragging) return;
+        isDragging = false;
+        if (!dragMoved) {
+          const rect = canvas.getBoundingClientRect();
+          const mx = e.clientX - rect.left;
+          const my = e.clientY - rect.top;
+          const hit = hitTestCanvas(mx, my);
+          if (hit) {
+            selectElementForInspector(hit);
+            if (hit.type === 'branch' && !hit.data.isLeaf) {
+              if (e.shiftKey) {
+                focusedSubtreeRoot = hit.data;
+                document.getElementById('subtreeBanner').classList.remove('hidden');
+                document.getElementById('subtreeBannerText').textContent =
+                  `Subtree Focus: ${hit.data.rawLabel} (${hit.data.leafCount} tips)`;
+                fitTreeToScreen();
+              } else {
+                if (collapsedNodeIds.has(hit.data.id)) {
+                  collapsedNodeIds.delete(hit.data.id);
+                } else {
+                  collapsedNodeIds.add(hit.data.id);
+                }
+                renderCanvas();
+              }
+            }
+          }
+        }
+      });
+
+      window.addEventListener('resize', () => renderCanvas());
+    }
+
+    function selectElementForInspector(hit) {
+      selectedElement = hit;
+      if (hit.type === 'shunt') {
+        const sh = hit.data;
+        document.getElementById('inspTitle').textContent = `Shunt: ${sh.label_u} ↔ ${sh.label_v}`;
+        document.getElementById('inspType').innerHTML =
+          `<span class="pill ${sh.mode === 'SPARSE' ? 'pill-sparse' : 'pill-interval'}">${sh.mode} SHUNT</span>`;
+        document.getElementById('inspMdl').textContent =
+          `+${sh.net_mdl_gain_nats.toFixed(2)} nats (P_MDL = ${(sh.posterior_prob * 100).toFixed(1)}%)`;
+        document.getElementById('inspMut').textContent =
+          `m = ${sh.shared_mutations} parallel sites (Sav: ${sh.data_savings_nats.toFixed(1)}, Tax: ${(sh.mask_cost_nats + sh.endpoint_cost_nats).toFixed(1)} nats)`;
+        const codons = [...new Set(sh.sites.map(s => Math.floor(s / 3) + 1))];
+        document.getElementById('inspSites').textContent =
+          `Sites: [${sh.sites.join(', ')}]  |  Codons (1-based): [${codons.join(', ')}]`;
+      } else {
+        const nd = hit.data;
+        document.getElementById('inspTitle').textContent =
+          `${formatDisplayName(nd.rawLabel)} (${nd.leafCount} descendant tip${nd.leafCount === 1 ? '' : 's'})`;
+        if (nd.isLeaf) {
+          document.getElementById('inspType').innerHTML = `<span class="pill pill-resolved">TERMINAL LEAF</span>`;
+        } else if (nd.degree >= 4) {
+          document.getElementById('inspType').innerHTML = `<span class="pill pill-polytomy">POLYTOMY HUB (${nd.degree}-WAY)</span>`;
+        } else {
+          document.getElementById('inspType').innerHTML = `<span class="pill pill-resolved">RESOLVED CLADE</span>`;
+        }
+        document.getElementById('inspMdl').textContent =
+          `ΔL = ${nd.mdlGain.toFixed(2)} nats  |  P_MDL = ${(nd.mdlSupport * 100).toFixed(1)}%`;
+        document.getElementById('inspMut').textContent =
+          `m_e = ${nd.mutationCount.toFixed(1)} muts  |  branch_length = ${nd.branchLength.toFixed(6)}`;
+        document.getElementById('inspSites').textContent =
+          nd.synSites && nd.synSites.length > 0
+            ? `${nd.synSites.length} clean synapomorphy sites: [${nd.synSites.slice(0, 40).join(', ')}${nd.synSites.length > 40 ? '...' : ''}]`
+            : 'No internal synapomorphy list on terminal branch.';
+      }
+      renderBarcodeTrack();
+      renderCanvas();
+    }
+
+    window.expandAllClades = function() {
+      collapsedNodeIds.clear();
+      renderCanvas();
+    };
+
+    window.resetSubtreeFocus = function() {
+      focusedSubtreeRoot = null;
+      document.getElementById('subtreeBanner').classList.add('hidden');
+      fitTreeToScreen();
+    };
+
+    window.toggleSidebar = function() {
+      document.getElementById('mainGrid').classList.toggle('sidebar-collapsed');
+      setTimeout(() => renderCanvas(), 220);
+    };
+
+    window.toggleFullscreen = function() {
+      const enc = document.getElementById('canvasEnclosure');
+      if (!document.fullscreenElement) {
+        if (enc.requestFullscreen) enc.requestFullscreen();
+        else enc.classList.toggle('fullscreen-fallback');
+      } else {
+        document.exitFullscreen();
+      }
+      setTimeout(() => fitTreeToScreen(), 200);
+    };
+
+    window.handleSearchTaxon = function() {
+      searchQuery = document.getElementById('searchTaxonInput').value.trim();
+      renderCanvas();
+    };
+
+    // -----------------------------------------------------------------------
+    // 8. Dashboard Summary, Legend, Barcode Track, and Audit Tables
+    // -----------------------------------------------------------------------
+    function updateDashboardStats() {
+      if (!currentResult) return;
+      const r = currentResult;
+      document.getElementById('statTaxa').textContent = `${r.n_taxa} Taxa`;
+      document.getElementById('statSites').textContent = `L = ${r.n_sites} bp (L_eff = ${r.l_eff.toFixed(0)})`;
+
+      if (r.star_tree_nats > 0) {
+        const pct = ((r.full_graph_nats / r.star_tree_nats) * 100).toFixed(1);
+        document.getElementById('statGraphNats').textContent = `${r.full_graph_nats.toFixed(0)} nats`;
+        document.getElementById('statCompressionPct').textContent = `${pct}% of Star Null (${r.star_tree_nats.toFixed(0)})`;
+      } else {
+        document.getElementById('statGraphNats').textContent = 'Newick Mode';
+        document.getElementById('statCompressionPct').textContent = 'Direct Tree Audit';
+      }
+
+      document.getElementById('statSplits').textContent =
+        `${r.n_internal_branches} / ${r.max_binary_internal_branches}`;
+      const resPct = r.max_binary_internal_branches > 0
+        ? ((r.n_internal_branches / r.max_binary_internal_branches) * 100).toFixed(1)
+        : '0.0';
+      document.getElementById('statResolutionPct').textContent = `${resPct}% binary resolution`;
+
+      document.getElementById('statPolytomies').textContent = r.polytomy_nodes;
+      document.getElementById('statMaxDegree').textContent = `Max hub degree: d = ${r.max_polytomy_degree}`;
+
+      const nShunts = (r.shunts || []).length;
+      const shuntGain = (r.shunts || []).reduce((acc, s) => acc + s.net_mdl_gain_nats, 0);
+      document.getElementById('statShunts').textContent = nShunts;
+      document.getElementById('statShuntGain').textContent = `+${shuntGain.toFixed(1)} nats saved`;
+
+      document.getElementById('statRuntime').textContent = `${(r.runtime_ms || 0).toFixed(1)} ms`;
+    }
+
+    function renderLegend() {
+      const bar = document.getElementById('legendBar');
+      bar.innerHTML = '<span style="font-weight:700;color:var(--text-secondary);text-transform:uppercase;">Clade Ribbons &amp; Overlays:</span>';
+      for (const [grp, col] of groupColorMap.entries()) {
+        const item = document.createElement('div');
+        item.className = 'legend-item';
+        item.innerHTML = `<span class="swatch" style="background:${col}"></span><span>${grp}</span>`;
+        bar.appendChild(item);
+      }
+      const extra = document.createElement('div');
+      extra.className = 'legend-item';
+      extra.style.marginLeft = 'auto';
+      extra.innerHTML = `
+        <span class="swatch" style="background:#fffbeb;border-color:#d97706;"></span><span>Polytomy Hub (d&ge;4)</span>
+        <span class="swatch" style="background:#ff4f00;margin-left:8px;"></span><span>SPARSE Shunt</span>
+        <span class="swatch" style="background:#0369a1;margin-left:8px;"></span><span>INTERVAL HGT Shunt</span>
+      `;
+      bar.appendChild(extra);
+    }
+
+    function renderBarcodeTrack() {
+      const canvas = document.getElementById('barcodeCanvas');
+      if (!canvas || !currentResult) return;
+      const dpr = window.devicePixelRatio || 1;
+      const rect = canvas.getBoundingClientRect();
+      canvas.width = Math.floor(rect.width * dpr);
+      canvas.height = Math.floor(rect.height * dpr);
+      const ctx = canvas.getContext('2d');
+      ctx.save();
+      ctx.scale(dpr, dpr);
+      const W = rect.width;
+      const H = rect.height;
+      ctx.clearRect(0, 0, W, H);
+
+      const L = Math.max(1, currentResult.n_sites || 1);
+      const weights = currentResult.site_weights || [];
+
+      // Draw site coherence weight profile w_s
+      if (weights.length > 0) {
+        const nBins = Math.min(W, weights.length);
+        ctx.fillStyle = '#d0cecd';
+        for (let b = 0; b < nBins; b++) {
+          const sIdx = Math.floor((b / nBins) * weights.length);
+          const w = weights[sIdx] || 1.0;
+          const barH = Math.min(H - 18, (w / 1.5) * (H - 22));
+          ctx.fillRect((b / nBins) * W, H - 14 - barH, Math.max(1, W / nBins), barH);
+        }
+      }
+
+      // Highlight selected branch synapomorphy sites in green
+      if (selectedElement && selectedElement.type === 'branch' && selectedElement.data.synSites) {
+        ctx.fillStyle = '#15803d';
+        for (const s of selectedElement.data.synSites) {
+          const x = (s / L) * W;
+          ctx.fillRect(x - 1, 4, 2.5, H - 18);
+        }
+      }
+
+      // Highlight certified shunts
+      if (currentResult.shunts) {
+        for (const sh of currentResult.shunts) {
+          if (sh.mode === 'INTERVAL' && sh.interval_span) {
+            const x0 = (sh.interval_span[0] / L) * W;
+            const x1 = (sh.interval_span[1] / L) * W;
+            ctx.fillStyle = 'rgba(3, 105, 161, 0.28)';
+            ctx.fillRect(x0, 2, Math.max(4, x1 - x0), H - 16);
+            ctx.strokeStyle = '#0369a1';
+            ctx.strokeRect(x0, 2, Math.max(4, x1 - x0), H - 16);
+          } else {
+            ctx.fillStyle = '#ff4f00';
+            for (const s of sh.sites) {
+              const x = (s / L) * W;
+              ctx.fillRect(x - 1.5, 2, 3, H - 16);
+            }
+          }
+        }
+      }
+
+      // Bottom coordinate ruler
+      ctx.fillStyle = '#585651';
+      ctx.font = '600 9.5px ui-monospace, monospace';
+      ctx.fillText('1 bp', 4, H - 3);
+      ctx.fillText(`${Math.floor(L / 2)} bp`, W * 0.5 - 20, H - 3);
+      ctx.fillText(`${L} bp`, W - 48, H - 3);
+      ctx.restore();
+    }
+
+    function renderAuditTables() {
+      const shBody = document.getElementById('shuntsTableBody');
+      const brBody = document.getElementById('branchesTableBody');
+      shBody.innerHTML = '';
+      brBody.innerHTML = '';
+
+      if (!currentResult) return;
+      const shunts = currentResult.shunts || [];
+      document.getElementById('shuntTableCount').textContent = `${shunts.length} Certified Shunt${shunts.length === 1 ? '' : 's'}`;
+
+      if (shunts.length === 0) {
+        shBody.innerHTML = `<tr><td colspan="9" style="color:var(--text-tertiary);text-align:center;">No reticulate shunts exceeded the combinatorial MDL threshold (strictly clonal tree).</td></tr>`;
+      } else {
+        shunts.forEach((sh, i) => {
+          const tr = document.createElement('tr');
+          tr.className = 'clickable-row';
+          const codons = [...new Set(sh.sites.map(s => Math.floor(s / 3) + 1))];
+          const coordText = sh.interval_span
+            ? `Span ${sh.interval_span[0]}..${sh.interval_span[1]} (${sh.sites.length} sites)`
+            : `Sites [${sh.sites.join(', ')}] (Codons [${codons.join(', ')}])`;
+          tr.innerHTML = `
+            <td>#${i + 1}</td>
+            <td><span class="pill ${sh.mode === 'SPARSE' ? 'pill-sparse' : 'pill-interval'}">${sh.mode}</span></td>
+            <td><strong>${sh.label_u} &harr; ${sh.label_v}</strong></td>
+            <td>${sh.shared_mutations}</td>
+            <td>+${sh.data_savings_nats.toFixed(2)} nats</td>
+            <td>-${(sh.mask_cost_nats + sh.endpoint_cost_nats).toFixed(2)} nats</td>
+            <td style="color:var(--status-green);font-weight:700;">+${sh.net_mdl_gain_nats.toFixed(2)} nats</td>
+            <td>${(sh.posterior_prob * 100).toFixed(1)}%</td>
+            <td>${coordText}</td>
+          `;
+          tr.onclick = () => selectElementForInspector({ type: 'shunt', data: sh });
+          shBody.appendChild(tr);
+        });
+      }
+
+      const intBranches = (currentResult.branches || [])
+        .filter(b => b.is_internal)
+        .sort((a, b) => b.mdl_gain_nats - a.mdl_gain_nats);
+
+      for (const b of intBranches.slice(0, 80)) {
+        const tr = document.createElement('tr');
+        tr.className = 'clickable-row';
+        const lu = currentResult.node_labels?.[b.u] || `N${b.u}`;
+        const lv = currentResult.node_labels?.[b.v] || `N${b.v}`;
+        const du = (currentResult.adjacency?.[b.u] || []).length;
+        const dv = (currentResult.adjacency?.[b.v] || []).length;
+        tr.innerHTML = `
+          <td><strong>${lu} &ndash; ${lv}</strong></td>
+          <td>(${du}, ${dv})</td>
+          <td>${b.mutation_count.toFixed(1)}</td>
+          <td>${b.branch_length.toFixed(6)}</td>
+          <td style="color:var(--status-green);font-weight:700;">+${b.mdl_gain_nats.toFixed(2)}</td>
+          <td>${(b.mdl_support * 100).toFixed(1)}%</td>
+          <td>${(b.synapomorphy_sites || []).slice(0, 10).join(', ')}${(b.synapomorphy_sites || []).length > 10 ? '...' : ''}</td>
+        `;
+        tr.onclick = () => {
+          const nd = nodeById.get(b.v) || nodeById.get(b.u);
+          if (nd) selectElementForInspector({ type: 'branch', data: nd });
+        };
+        brBody.appendChild(tr);
+      }
+    }
+
+    // -----------------------------------------------------------------------
+    // 9. File Upload & Export Helpers
+    // -----------------------------------------------------------------------
+    window.handleFastaFile = function(e) {
+      const file = e.target.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = (ev) => {
+        document.getElementById('fastaInput').value = ev.target.result;
+        runFastaInduction();
+      };
+      reader.readAsText(file);
+    };
+
+    window.handleNewickFile = function(e) {
+      const file = e.target.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = (ev) => {
+        document.getElementById('newickInput').value = ev.target.result;
+        loadCustomNewick();
+      };
+      reader.readAsText(file);
+    };
+
+    window.exportNewickFile = function() {
+      if (!currentResult || !currentResult.newick) return;
+      const blob = new Blob([currentResult.newick + '\n'], { type: 'text/plain' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = 'bushwhacker_mdl_tree.nwk';
+      a.click();
+    };
+
+    window.exportJSONFile = function() {
+      if (!currentResult) return;
+      const blob = new Blob([JSON.stringify(currentResult, null, 2)], { type: 'application/json' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = 'bushwhacker_mdl_graph.json';
+      a.click();
+    };
+
+    window.exportPNGFile = function() {
+      const canvas = document.getElementById('treeCanvas');
+      const a = document.createElement('a');
+      a.href = canvas.toDataURL('image/png');
+      a.download = 'bushwhacker_tree.png';
+      a.click();
+    };
+
+    // Drag-and-drop listeners
+    const dz = document.getElementById('fastaDropzone');
+    dz.addEventListener('dragover', (e) => { e.preventDefault(); dz.classList.add('dragover'); });
+    dz.addEventListener('dragleave', () => dz.classList.remove('dragover'));
+    dz.addEventListener('drop', (e) => {
+      e.preventDefault();
+      dz.classList.remove('dragover');
+      const file = e.dataTransfer.files[0];
+      if (file) {
+        const reader = new FileReader();
+        reader.onload = (ev) => {
+          document.getElementById('fastaInput').value = ev.target.result;
+          runFastaInduction();
+        };
+        reader.readAsText(file);
+      }
+    });
+
+    setupCanvasEvents();
+    boot();
+  </script>
+</body>
+</html>
