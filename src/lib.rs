@@ -1648,6 +1648,7 @@ impl BushwhackerEngine {
         let mut min_dist = vec![f64::INFINITY; m];
         let mut sum_dist = vec![0.0_f64; m];
         let mut best_k = vec![0usize; m];
+        let mut land_dists = vec![vec![0.0_f64; m]; k_land];
 
         for k_idx in 0..k_land {
             let lk = landmarks[k_idx];
@@ -1664,6 +1665,7 @@ impl BushwhackerEngine {
                         l_eff,
                     )
                 };
+                land_dists[k_idx][i] = d;
                 sum_dist[i] += d;
                 if d < min_dist[i] {
                     min_dist[i] = d;
@@ -1699,67 +1701,166 @@ impl BushwhackerEngine {
         let mut cells: Vec<Vec<(f64, Vec<usize>)>> = vec![Vec::new(); k_land];
 
         // Lock sister cherries/clades into indivisible micro-clusters (size <= 8)
-        // using the Landmark-Centered NJ Q-criterion q(i, j) = d(i, j) - r_i - r_j
-        // so terminal branch lengths cancel out and Voronoi boundaries never sever sister taxa!
+        // in strict O(M log M * L / 64) time using Johnson-Lindenstrauss 64-bit bit-plane LSH
+        // projections on shared core valid sites + landmark distance projections.
+        let n_words = seqs[&items[0]].words.len();
+        let mut core_valid = vec![!0u64; n_words];
+        let step_s = (m / 32).max(1);
+        for s_idx in (0..m).step_by(step_s) {
+            for (cw, w) in core_valid.iter_mut().zip(&seqs[&items[s_idx]].words) {
+                *cw &= w.valid;
+            }
+        }
+        let core_ones: u32 = core_valid.iter().map(|w| w.count_ones()).sum();
+        if core_ones < 64 {
+            core_valid.fill(!0u64);
+        }
+
+        let n_proj = 12usize;
+        let mut proj_orders: Vec<Vec<usize>> = Vec::with_capacity(n_proj + 6);
+
+        for r in 0..n_proj {
+            let mut masks = Vec::with_capacity(n_words);
+            let mut seed = 0x9E37_79B9_7F4A_7C15_u64
+                .wrapping_mul((r as u64) + 1)
+                .wrapping_add(0xBF58_476D_1CE4_E5B9_u64);
+            for &cw in &core_valid {
+                let mut next_u64 = || -> u64 {
+                    seed = seed.wrapping_add(0x9E37_79B9_7F4A_7C15_u64);
+                    let mut z = seed;
+                    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9_u64);
+                    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB_u64);
+                    z ^ (z >> 31)
+                };
+                // Random 2-bit selector per site restricted to shared core valid sites `cw`
+                let u = next_u64();
+                let v = next_u64();
+                let m0 = u & v;
+                let m1 = u & !v;
+                let m2 = !u & v;
+                let m3 = !u & !v;
+                masks.push((
+                    (m0 | m1) & cw,
+                    (m0 | m2) & cw,
+                    (m1 | m3) & cw,
+                    (m2 | m3) & cw,
+                    cw,
+                ));
+            }
+            let mut scored: Vec<(f64, usize)> = (0..m)
+                .map(|i| {
+                    let pi = &seqs[&items[i]];
+                    let mut hits_sum = 0i32;
+                    let mut val_sum = 0i32;
+                    for (w, &(p0, p1, p2, p3, cw)) in pi.words.iter().zip(&masks) {
+                        let h = (w.b0 & p0) | (w.b1 & p1) | (w.b2 & p2) | (w.b3 & p3);
+                        hits_sum += h.count_ones() as i32;
+                        val_sum += (w.valid & cw).count_ones() as i32;
+                    }
+                    let sc = (hits_sum as f64) / (val_sum.max(1) as f64);
+                    (sc, i)
+                })
+                .collect();
+            scored.sort_by(|a, b| {
+                a.0.partial_cmp(&b.0)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| a.1.cmp(&b.1))
+            });
+            proj_orders.push(scored.into_iter().map(|x| x.1).collect());
+        }
+
+        // Also project centered landmark distance vectors (d(i, L_k) - mean_d(i)) along 4 random axes
+        for r in 0..4usize {
+            let mut l_signs = vec![1.0_f64; k_land];
+            let mut seed = 0x517C_C1B7_2722_0A95_u64.wrapping_mul((r as u64) + 1);
+            for s in &mut l_signs {
+                seed = seed
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                *s = if (seed >> 63) == 0 { 1.0 } else { -1.0 };
+            }
+            let mut scored: Vec<(f64, usize)> = (0..m)
+                .map(|i| {
+                    let mut acc = 0.0_f64;
+                    let mi = mean_l_dist[i];
+                    for k_idx in 0..k_land {
+                        acc += l_signs[k_idx] * (land_dists[k_idx][i] - mi);
+                    }
+                    (acc, i)
+                })
+                .collect();
+            scored.sort_by(|a, b| {
+                a.0.partial_cmp(&b.0)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| a.1.cmp(&b.1))
+            });
+            proj_orders.push(scored.into_iter().map(|x| x.1).collect());
+        }
+
+        // Also include 2 landmark-sorted orders (by primary cell + min_dist, and by mean_l_dist)
+        let mut by_cell: Vec<usize> = (0..m).collect();
+        by_cell.sort_by(|&a, &b| {
+            best_k[a]
+                .cmp(&best_k[b])
+                .then_with(|| {
+                    min_dist[a]
+                        .partial_cmp(&min_dist[b])
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .then_with(|| a.cmp(&b))
+        });
+        proj_orders.push(by_cell);
+
+        let mut by_mean: Vec<usize> = (0..m).collect();
+        by_mean.sort_by(|&a, &b| {
+            mean_l_dist[a]
+                .partial_cmp(&mean_l_dist[b])
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.cmp(&b))
+        });
+        proj_orders.push(by_mean);
+
+        let win_radius = 20usize;
+        let mut cand_neighbors: Vec<Vec<usize>> =
+            vec![Vec::with_capacity(win_radius * proj_orders.len() * 2); m];
+        for order in &proj_orders {
+            for pos in 0..m {
+                let u = order[pos];
+                let end = (pos + 1 + win_radius).min(m);
+                for &v in &order[(pos + 1)..end] {
+                    cand_neighbors[u].push(v);
+                    cand_neighbors[v].push(u);
+                }
+            }
+        }
+
         let mut nn_edges: Vec<(f64, usize, usize)> = Vec::with_capacity(m);
-        if m <= 2048 {
-            for i in 0..m {
-                let si = &seqs[&items[i]];
-                let ri = mean_l_dist[i];
-                let mut best_q = f64::INFINITY;
-                let mut best_j = i;
-                for j in 0..m {
-                    if i != j {
-                        let d = Self::compute_pair_jc_dist_packed(
-                            si,
-                            &seqs[&items[j]],
-                            site_weights,
-                            word_weight_sums,
-                            l_eff,
-                        );
-                        let q = d - ri - mean_l_dist[j];
-                        if q < best_q {
-                            best_q = q;
-                            best_j = j;
-                        }
+        for i in 0..m {
+            let cands = &mut cand_neighbors[i];
+            cands.sort_unstable();
+            cands.dedup();
+            let si = &seqs[&items[i]];
+            let ri = mean_l_dist[i];
+            let mut best_q = f64::INFINITY;
+            let mut best_j = i;
+            for &j in cands.iter() {
+                if i != j {
+                    let d = Self::compute_pair_jc_dist_packed(
+                        si,
+                        &seqs[&items[j]],
+                        site_weights,
+                        word_weight_sums,
+                        l_eff,
+                    );
+                    let q = d - ri - mean_l_dist[j];
+                    if q < best_q {
+                        best_q = q;
+                        best_j = j;
                     }
-                }
-                if best_j != i {
-                    nn_edges.push((best_q, i, best_j));
                 }
             }
-        } else {
-            // For M > 2048, find minimum-Q sister within each landmark bucket in O(M * (M/K))
-            let mut raw_buckets: Vec<Vec<usize>> = vec![Vec::new(); k_land];
-            for i in 0..m {
-                raw_buckets[best_k[i]].push(i);
-            }
-            for bucket in &raw_buckets {
-                for &i in bucket {
-                    let si = &seqs[&items[i]];
-                    let ri = mean_l_dist[i];
-                    let mut best_q = f64::INFINITY;
-                    let mut best_j = i;
-                    for &j in bucket {
-                        if i != j {
-                            let d = Self::compute_pair_jc_dist_packed(
-                                si,
-                                &seqs[&items[j]],
-                                site_weights,
-                                word_weight_sums,
-                                l_eff,
-                            );
-                            let q = d - ri - mean_l_dist[j];
-                            if q < best_q {
-                                best_q = q;
-                                best_j = j;
-                            }
-                        }
-                    }
-                    if best_j != i {
-                        nn_edges.push((best_q, i, best_j));
-                    }
-                }
+            if best_j != i {
+                nn_edges.push((best_q, i, best_j));
             }
         }
         nn_edges.sort_by(|a, b| {
