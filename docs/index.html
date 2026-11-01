@@ -582,13 +582,20 @@
       right: 10px;
       width: 168px;
       height: 116px;
-      background: rgba(255, 255, 255, 0.92);
-      border: 1px solid var(--border-normal);
+      background: rgba(255, 255, 255, 0.94);
+      border: 1px solid var(--border-strong);
       border-radius: 4px;
-      box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+      box-shadow: 0 2px 10px rgba(0,0,0,0.12);
       z-index: 20;
       overflow: hidden;
       backdrop-filter: blur(6px);
+      cursor: grab;
+      user-select: none;
+    }
+
+    .minimap-box:active {
+      cursor: grabbing;
+      border-color: var(--braun-orange);
     }
 
     .minimap-label {
@@ -2337,41 +2344,188 @@
       }
     }
 
+    // Minimap coordinate bounds in normalized tree world units:
+    // Rectangular: u in [-0.04, 1.36] (tree [0..1] + labels/ribbons [1..1.32]), v in [-0.04, 1.04]
+    // Circular:    u in [-1.35, 1.35], v in [-1.35, 1.35]
+    function getMinimapTransform() {
+      const mCanvas = document.getElementById('minimapCanvas');
+      const mainCanvas = document.getElementById('treeCanvas');
+      if (!mCanvas || !mainCanvas) return null;
+      const mainRect = mainCanvas.getBoundingClientRect();
+      const layout = computeTreeLayout();
+      const nLeaves = Math.max(1, layout.nVisibleLeaves);
+
+      const W = 168;
+      const H = 116;
+      const padL = 10, padR = 10, padT = 16, padB = 8;
+      const innerW = W - padL - padR;
+      const innerH = H - padT - padB;
+
+      if (layoutMode === 'circular') {
+        const maxR = Math.max(1, Math.min(mainRect.width, mainRect.height) * 0.37 * cam.scale);
+        const uMin = -1.35, uSpan = 2.70;
+        const vMin = -1.35, vSpan = 2.70;
+        const scale = Math.min(innerW / uSpan, innerH / vSpan);
+        const offX = padL + (innerW - uSpan * scale) * 0.5;
+        const offY = padT + (innerH - vSpan * scale) * 0.5;
+        return {
+          mode: 'circular', W, H, mainRect, layout, nLeaves, maxR,
+          uToM: (u) => offX + (u - uMin) * scale,
+          vToM: (v) => offY + (v - vMin) * scale,
+          mToU: (mx) => uMin + (mx - offX) / scale,
+          mToV: (my) => vMin + (my - offY) / scale,
+          worldScaleX: maxR,
+          worldScaleY: maxR
+        };
+      } else {
+        const baseRowH = cam._rowH || Math.max(2.2, Math.min(18, (mainRect.height - 60) / nLeaves));
+        const baseTreeW = cam._treeW || Math.max(260, mainRect.width - 340);
+        const treeW = Math.max(1, baseTreeW * cam.scale);
+        const treeH = Math.max(1, nLeaves * baseRowH * cam.scale);
+        const uMin = -0.04, uSpan = 1.42;
+        const vMin = -0.04, vSpan = 1.08;
+        return {
+          mode: 'rectangular', W, H, mainRect, layout, nLeaves, treeW, treeH,
+          uToM: (u) => padL + ((u - uMin) / uSpan) * innerW,
+          vToM: (v) => padT + ((v - vMin) / vSpan) * innerH,
+          mToU: (mx) => uMin + ((mx - padL) / innerW) * uSpan,
+          mToV: (my) => vMin + ((my - padT) / innerH) * vSpan,
+          worldScaleX: treeW,
+          worldScaleY: treeH
+        };
+      }
+    }
+
     function renderMinimap(layout) {
       const mCanvas = document.getElementById('minimapCanvas');
       if (!mCanvas) return;
+      const tf = getMinimapTransform();
+      if (!tf) return;
+
+      const dpr = window.devicePixelRatio || 1;
+      const W = tf.W;
+      const H = tf.H;
+      if (mCanvas.width !== Math.floor(W * dpr) || mCanvas.height !== Math.floor(H * dpr)) {
+        mCanvas.width = Math.floor(W * dpr);
+        mCanvas.height = Math.floor(H * dpr);
+        mCanvas.style.width = `${W}px`;
+        mCanvas.style.height = `${H}px`;
+      }
+
       const ctx = mCanvas.getContext('2d');
-      const W = mCanvas.width;
-      const H = mCanvas.height;
+      ctx.save();
+      ctx.scale(dpr, dpr);
       ctx.clearRect(0, 0, W, H);
 
-      if (layout.visibleNodes.length === 0) return;
-      const pad = 12;
-      const nLeaves = Math.max(1, layout.nVisibleLeaves);
+      if (layout.visibleNodes.length === 0) {
+        ctx.restore();
+        return;
+      }
 
-      ctx.strokeStyle = '#8a8882';
-      ctx.lineWidth = 0.8;
+      const nLeaves = tf.nLeaves;
+
+      // 1. Draw miniature tree skeleton
+      ctx.strokeStyle = '#787670';
+      ctx.lineWidth = 0.85;
       ctx.beginPath();
-      for (const nd of layout.visibleNodes) {
-        if (nd === layout.root) continue;
-        const p = nodeById.get(nd.parentId);
-        if (!p) continue;
-        const x0 = pad + p._normX * (W - 2 * pad);
-        const y0 = pad + (p._y / nLeaves) * (H - 2 * pad);
-        const x1 = pad + nd._normX * (W - 2 * pad);
-        const y1 = pad + (nd._y / nLeaves) * (H - 2 * pad);
-        ctx.moveTo(x0, y0);
-        ctx.lineTo(x0, y1);
-        ctx.lineTo(x1, y1);
+
+      if (tf.mode === 'circular') {
+        const angleSpan = Math.PI * 1.92;
+        const startAngle = -Math.PI * 0.96;
+        for (const nd of layout.visibleNodes) {
+          if (nd === layout.root) continue;
+          const p = nodeById.get(nd.parentId);
+          if (!p) continue;
+          const thP = startAngle + (p._y / Math.max(1, nLeaves - 1)) * angleSpan;
+          const thN = startAngle + (nd._y / Math.max(1, nLeaves - 1)) * angleSpan;
+          const x0 = tf.uToM(p._normX * Math.cos(thP));
+          const y0 = tf.vToM(p._normX * Math.sin(thP));
+          const xm = tf.uToM(p._normX * Math.cos(thN));
+          const ym = tf.vToM(p._normX * Math.sin(thN));
+          const x1 = tf.uToM(nd._normX * Math.cos(thN));
+          const y1 = tf.vToM(nd._normX * Math.sin(thN));
+          ctx.moveTo(x0, y0);
+          ctx.lineTo(xm, ym);
+          ctx.lineTo(x1, y1);
+        }
+      } else {
+        for (const nd of layout.visibleNodes) {
+          if (nd === layout.root) continue;
+          const p = nodeById.get(nd.parentId);
+          if (!p) continue;
+          const x0 = tf.uToM(p._normX);
+          const y0 = tf.vToM(p._y / nLeaves);
+          const x1 = tf.uToM(nd._normX);
+          const y1 = tf.vToM(nd._y / nLeaves);
+          ctx.moveTo(x0, y0);
+          ctx.lineTo(x0, y1);
+          ctx.lineTo(x1, y1);
+        }
       }
       ctx.stroke();
 
-      // Viewport indicator box
+      // 2. Draw miniature clade ribbon bar on right (rectangular mode)
+      if (tf.mode === 'rectangular' && groupColorMap.size > 0) {
+        const rx = tf.uToM(1.14);
+        for (const lf of layout.visibleLeaves) {
+          if (lf.cladeGroup && groupColorMap.has(lf.cladeGroup)) {
+            ctx.fillStyle = groupColorMap.get(lf.cladeGroup);
+            const ry = tf.vToM(lf._y / nLeaves);
+            ctx.fillRect(rx, ry - 0.8, 3, Math.max(1.5, 80 / nLeaves));
+          }
+        }
+      }
+
+      // 3. Compute exact visible viewport box in minimap coordinates from cam.x, cam.y, cam.scale
+      const uVisMin = (0 - cam.x) / tf.worldScaleX;
+      const uVisMax = (tf.mainRect.width - cam.x) / tf.worldScaleX;
+      const vVisMin = (0 - cam.y) / tf.worldScaleY;
+      const vVisMax = (tf.mainRect.height - cam.y) / tf.worldScaleY;
+
+      const vx0 = tf.uToM(uVisMin);
+      const vy0 = tf.vToM(vVisMin);
+      const vx1 = tf.uToM(uVisMax);
+      const vy1 = tf.vToM(vVisMax);
+
+      // Clamp drawn box softly inside minimap frame while preserving true center
+      const rx = Math.max(1, Math.min(W - 6, vx0));
+      const ry = Math.max(1, Math.min(H - 6, vy0));
+      const rw = Math.max(5, Math.min(W - 1 - rx, vx1 - vx0));
+      const rh = Math.max(5, Math.min(H - 1 - ry, vy1 - vy0));
+
+      ctx.fillStyle = 'rgba(255, 79, 0, 0.14)';
+      ctx.fillRect(rx, ry, rw, rh);
       ctx.strokeStyle = '#ff4f00';
-      ctx.lineWidth = 1.2;
-      const vw = Math.min(W - 4, (W - 2 * pad) / Math.max(1, cam.scale));
-      const vh = Math.min(H - 4, (H - 2 * pad) / Math.max(1, cam.scale));
-      ctx.strokeRect(pad, pad, vw, vh);
+      ctx.lineWidth = 1.5;
+      ctx.strokeRect(rx, ry, rw, rh);
+
+      // Center crosshair dot inside viewport rectangle
+      const vcx = Math.max(3, Math.min(W - 3, 0.5 * (vx0 + vx1)));
+      const vcy = Math.max(3, Math.min(H - 3, 0.5 * (vy0 + vy1)));
+      ctx.fillStyle = '#ff4f00';
+      ctx.beginPath();
+      ctx.arc(vcx, vcy, 2, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.restore();
+    }
+
+    function panCameraFromMinimapPoint(clientX, clientY, grabOffsetU = 0, grabOffsetV = 0) {
+      const mCanvas = document.getElementById('minimapCanvas');
+      if (!mCanvas) return;
+      const tf = getMinimapTransform();
+      if (!tf) return;
+      const mRect = mCanvas.getBoundingClientRect();
+      const mx = clientX - mRect.left;
+      const my = clientY - mRect.top;
+
+      const uTarget = tf.mToU(mx) - grabOffsetU;
+      const vTarget = tf.mToV(my) - grabOffsetV;
+
+      // Place (uTarget, vTarget) at the center of the main canvas viewport
+      cam.x = tf.mainRect.width * 0.5 - uTarget * tf.worldScaleX;
+      cam.y = tf.mainRect.height * 0.5 - vTarget * tf.worldScaleY;
+      renderCanvas();
     }
 
     // -----------------------------------------------------------------------
@@ -2406,7 +2560,53 @@
 
     function setupCanvasEvents() {
       const canvas = document.getElementById('treeCanvas');
+      const mCanvas = document.getElementById('minimapCanvas');
       const tooltip = document.getElementById('canvasTooltip');
+      let isDraggingMinimap = false;
+      let minimapGrabOffsetU = 0;
+      let minimapGrabOffsetV = 0;
+
+      // Minimap interactive drag-to-pan and wheel-to-zoom
+      if (mCanvas) {
+        mCanvas.addEventListener('mousedown', (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          isDraggingMinimap = true;
+          const tf = getMinimapTransform();
+          if (tf) {
+            const mRect = mCanvas.getBoundingClientRect();
+            const mx = e.clientX - mRect.left;
+            const my = e.clientY - mRect.top;
+            const uClick = tf.mToU(mx);
+            const vClick = tf.mToV(my);
+
+            const uVisMin = (0 - cam.x) / tf.worldScaleX;
+            const uVisMax = (tf.mainRect.width - cam.x) / tf.worldScaleX;
+            const vVisMin = (0 - cam.y) / tf.worldScaleY;
+            const vVisMax = (tf.mainRect.height - cam.y) / tf.worldScaleY;
+            const uCenter = 0.5 * (uVisMin + uVisMax);
+            const vCenter = 0.5 * (vVisMin + vVisMax);
+
+            // If user clicked inside the current orange viewport box, preserve grab offset;
+            // if outside, jump center to clicked point immediately.
+            if (uClick >= uVisMin && uClick <= uVisMax && vClick >= vVisMin && vClick <= vVisMax) {
+              minimapGrabOffsetU = uClick - uCenter;
+              minimapGrabOffsetV = vClick - vCenter;
+            } else {
+              minimapGrabOffsetU = 0;
+              minimapGrabOffsetV = 0;
+              panCameraFromMinimapPoint(e.clientX, e.clientY, 0, 0);
+            }
+          }
+        });
+
+        mCanvas.addEventListener('wheel', (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          const factor = e.deltaY < 0 ? 1.14 : 0.88;
+          zoomBy(factor);
+        }, { passive: false });
+      }
 
       canvas.addEventListener('wheel', (e) => {
         e.preventDefault();
@@ -2424,6 +2624,11 @@
       });
 
       window.addEventListener('mousemove', (e) => {
+        if (isDraggingMinimap) {
+          panCameraFromMinimapPoint(e.clientX, e.clientY, minimapGrabOffsetU, minimapGrabOffsetV);
+          return;
+        }
+
         const rect = canvas.getBoundingClientRect();
         const mx = e.clientX - rect.left;
         const my = e.clientY - rect.top;
@@ -2477,6 +2682,10 @@
       });
 
       window.addEventListener('mouseup', (e) => {
+        if (isDraggingMinimap) {
+          isDraggingMinimap = false;
+          return;
+        }
         if (!isDragging) return;
         isDragging = false;
         if (!dragMoved) {
