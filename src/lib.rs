@@ -1402,11 +1402,13 @@ impl BushwhackerEngine {
         let mut mod_dist = vec![0.0_f64; l];
         let mut mod_tree = vec![0.0_f64; l];
         let deep_coding = frac_var >= 0.25 && frac_multi > 0.40;
+        let unsaturated_coding = frac_var >= 0.25 && frac_multi < 0.38;
 
         for s in 0..l {
             let w_mt = if frac_multi > 0.50 { 1.0 } else { w_mult[s] };
             let coh_tree_factor = (site_coh[s] * w_mt).clamp(0.75, 1.25);
-            let (eff_d, eff_t) = if deep_coding && coh_tree_factor >= 0.90 {
+            let (eff_d, eff_t) = if unsaturated_coding || (deep_coding && coh_tree_factor >= 0.90)
+            {
                 (1.0, 1.0)
             } else {
                 (dist_weights[s], tree_weights[s])
@@ -1807,33 +1809,59 @@ impl BushwhackerEngine {
             adj.get_mut(&1).unwrap().push(0);
             return (vec![ld, ld], adj, node_labels);
         }
-        if n <= 128 {
-            // Exact small-N path (N <= 128) with 64-site bit-plane SIMD & incremental O(N^2) agglomeration
-            let mut uw_mat = vec![0.0_f64; n * n];
-            for i in 0..n {
-                for j in (i + 1)..n {
-                    let d = Self::compute_pair_unweighted_jc_dist_packed(
-                        &packed_vec[i],
-                        &packed_vec[j],
-                        l_eff,
-                    );
-                    uw_mat[i * n + j] = d;
-                    uw_mat[j * n + i] = d;
-                }
-            }
+        if n <= 1024 {
+            // Exact SIMD + parallel O(N^2) agglomeration path for N <= 1024
+            #[cfg(not(target_arch = "wasm32"))]
+            let uw_rows: Vec<Vec<f64>> = (0..n)
+                .into_par_iter()
+                .map(|i| {
+                    let mut row = vec![0.0_f64; n];
+                    let pi = &packed_vec[i];
+                    for j in 0..n {
+                        if i != j {
+                            row[j] = Self::compute_pair_unweighted_jc_dist_packed(
+                                pi,
+                                &packed_vec[j],
+                                l_eff,
+                            );
+                        }
+                    }
+                    row
+                })
+                .collect();
+            #[cfg(target_arch = "wasm32")]
+            let uw_rows: Vec<Vec<f64>> = (0..n)
+                .map(|i| {
+                    let mut row = vec![0.0_f64; n];
+                    let pi = &packed_vec[i];
+                    for j in 0..n {
+                        if i != j {
+                            row[j] = Self::compute_pair_unweighted_jc_dist_packed(
+                                pi,
+                                &packed_vec[j],
+                                l_eff,
+                            );
+                        }
+                    }
+                    row
+                })
+                .collect();
+
             let mut loads = vec![0.0_f64; n];
             for i in 0..n {
+                let row_i = &uw_rows[i];
                 let mut j_near = if i == 0 { 1 } else { 0 };
-                let mut d_min = uw_mat[i * n + j_near];
+                let mut d_min = row_i[j_near];
                 for j in 0..n {
-                    if j != i && uw_mat[i * n + j] < d_min {
-                        d_min = uw_mat[i * n + j];
+                    if j != i && row_i[j] < d_min {
+                        d_min = row_i[j];
                         j_near = j;
                     }
                 }
+                let row_near = &uw_rows[j_near];
                 let mut deltas: Vec<f64> = (0..n)
                     .filter(|&k| k != i && k != j_near)
-                    .map(|k| uw_mat[i * n + k] - uw_mat[j_near * n + k])
+                    .map(|k| row_i[k] - row_near[k])
                     .collect();
                 let med = median_f64(&mut deltas);
                 loads[i] = (0.5 * (d_min + med)).clamp(0.4, d_min.max(0.8));
@@ -2098,7 +2126,7 @@ impl BushwhackerEngine {
                 None => true,
             };
             states.insert((x, y), new_state);
-            let max_d = if n <= 128 { 12 } else { 3 };
+            let max_d = if n <= 1024 { 12 } else { 4 };
             if changed && depth < max_d && y >= n {
                 for &z in &adj[&y] {
                     if z != x {
@@ -2225,7 +2253,7 @@ impl BushwhackerEngine {
             }
 
             // 2-Hop Cross-Node Attractor Swap (Radius-2 SPR across u - w - v)
-            if round_idx < 2 && n <= 250 {
+            if round_idx < 2 && n <= 1024 {
                 let int_nodes: Vec<usize> = adj
                     .iter()
                     .filter(|(&w, nbs)| w >= n && nbs.len() == 3)
@@ -2954,7 +2982,7 @@ impl BushwhackerEngine {
                 let mut alias: HashMap<usize, usize> = HashMap::new();
                 let mut contracted_any = false;
 
-                for (gain, raw_u, raw_v) in bad_edges {
+                for (_gain, raw_u, raw_v) in bad_edges {
                     let mut u = raw_u;
                     while let Some(&au) = alias.get(&u) {
                         u = au;
@@ -2966,9 +2994,7 @@ impl BushwhackerEngine {
                     if u == v {
                         continue;
                     }
-                    if (n <= 128 || gain > -1.0)
-                        && (locked_nodes.contains(&u) || locked_nodes.contains(&v))
-                    {
+                    if locked_nodes.contains(&u) || locked_nodes.contains(&v) {
                         continue;
                     }
                     if !adj.get(&u).map(|x| x.contains(&v)).unwrap_or(false) {
@@ -4251,7 +4277,10 @@ impl BushwhackerEngine {
                 let b = cand_sites[j];
                 let span_len = b - a + 1;
                 let m_in = j - i + 1;
-                if span_len < 15 {
+                if span_len < 15
+                    || (span_len as f64) > 0.55 * (l as f64)
+                    || span_len > 55 * m_in
+                {
                     continue;
                 }
                 let gaps_in = (gap_pref[b + 1] - gap_pref[a]) as usize;
@@ -4260,15 +4289,25 @@ impl BushwhackerEngine {
                 }
                 let mut best_rep_idx = 0usize;
                 let mut discordant = i32::MAX;
+                let mut total_disc_best = 0i32;
                 for (r_idx, dp) in disc_prefs.iter().enumerate() {
                     let d_val = dp[b + 1] - dp[a];
                     if d_val < discordant {
                         discordant = d_val;
                         best_rep_idx = r_idx;
+                        total_disc_best = dp[l];
                     }
                 }
                 let disc_f = discordant as f64;
-                if disc_f > 0.25 * (m_in as f64) || (disc_f / (span_len as f64)) > 0.03 {
+                let outside_disc = (total_disc_best - discordant).max(0) as f64;
+                let outside_len = (l.saturating_sub(span_len)).max(1) as f64;
+                let inside_rate = disc_f / (span_len as f64);
+                let outside_rate = outside_disc / outside_len;
+                if disc_f > 0.25 * (m_in as f64)
+                    || inside_rate > 0.03
+                    || outside_disc < 4.0
+                    || inside_rate > 0.35 * outside_rate
+                {
                     continue;
                 }
                 let disc_cost = if discordant > 0 {

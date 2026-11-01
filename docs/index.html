@@ -800,6 +800,7 @@
           </div>
           <div class="preset-row">
             <button class="preset-btn active-preset" id="preset_prestin" onclick="loadFastaPreset('prestin')">Mammalian Prestin (N=116, Echolocation)</button>
+            <button class="preset-btn" id="preset_InfluenzaA" onclick="loadFastaPreset('InfluenzaA')">Influenza A H3N2 Ladder (N=349)</button>
             <button class="preset-btn" id="preset_bglobin" onclick="loadFastaPreset('bglobin')">Vertebrate &beta;-Globin (N=17)</button>
             <button class="preset-btn" id="preset_polytomy" onclick="loadFastaPreset('polytomy')">Adaptive Polytomy Radiation (N=64)</button>
             <button class="preset-btn" id="preset_hgt" onclick="loadFastaPreset('hgt')">HGT / Recombination Mosaic (N=24)</button>
@@ -1406,7 +1407,7 @@
       if (btn) btn.classList.add('active-preset');
 
       const ta = document.getElementById('fastaInput');
-      if (presetId === 'prestin' || presetId === 'bglobin') {
+      if (presetId === 'prestin' || presetId === 'bglobin' || presetId === 'InfluenzaA') {
         const resp = await fetch(`./examples/${presetId}.fasta`);
         ta.value = await resp.text();
         document.getElementById('paramCoding').checked = true;
@@ -1493,9 +1494,26 @@
     // -----------------------------------------------------------------------
     // 4. Convert BUSHWHACKER Graph or Arbitrary Newick into Rooted Layout Tree
     // -----------------------------------------------------------------------
+    function extractFluSamplingYear(rawName) {
+      const m = rawName.match(/(\d{2})$/);
+      if (m) {
+        const y = parseInt(m[1], 10);
+        if (y >= 68 && y <= 98) return 1900 + y;
+      }
+      return null;
+    }
+
     function inferTaxonGroup(rawName) {
       if (PRESTIN_TAXONOMY[rawName]) {
         return PRESTIN_TAXONOMY[rawName].group;
+      }
+      const yr = extractFluSamplingYear(rawName);
+      if (yr !== null && currentResult && currentResult.n_taxa >= 200) {
+        if (yr <= 1987) return '1983–1987';
+        if (yr <= 1990) return '1988–1990';
+        if (yr <= 1992) return '1991–1992';
+        if (yr <= 1994) return '1993–1994';
+        return String(yr);
       }
       if (rawName.includes('_')) {
         return rawName.split('_')[0];
@@ -1529,13 +1547,31 @@
         branchMap.set(key, b);
       }
 
-      // Pick highest-degree internal node or midpoint-like internal node as root
+      // If dataset has temporal sampling years on >=80% of leaves (e.g. Influenza A ladder),
+      // root at the internal node adjacent to the earliest-year isolate so trunk flows left-to-right!
       let rootId = n;
       let bestDeg = -1;
-      for (const [u, nbs] of adj.entries()) {
-        if (u >= n && nbs.length > bestDeg) {
-          bestDeg = nbs.length;
-          rootId = u;
+      let yearCount = 0;
+      let earliestLeaf = -1;
+      let earliestYear = 99999;
+      for (let i = 0; i < n; i++) {
+        const yr = extractFluSamplingYear(res.names[i] || '');
+        if (yr !== null) {
+          yearCount++;
+          if (yr < earliestYear) {
+            earliestYear = yr;
+            earliestLeaf = i;
+          }
+        }
+      }
+      if (yearCount >= Math.floor(0.75 * n) && earliestLeaf >= 0 && (adj.get(earliestLeaf) || []).length > 0) {
+        rootId = adj.get(earliestLeaf)[0];
+      } else {
+        for (const [u, nbs] of adj.entries()) {
+          if (u >= n && nbs.length > bestDeg) {
+            bestDeg = nbs.length;
+            rootId = u;
+          }
         }
       }
       if (!adj.has(rootId)) rootId = 0;
