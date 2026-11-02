@@ -103,7 +103,7 @@ fn serialize_json(res: &BushwhackerResult, fasta_path: &str) -> String {
         .collect();
 
     format!(
-        "{{\n  \"tool\": \"BUSHWHACKER\",\n  \"input\": {},\n  \"n_taxa\": {},\n  \"seq_len\": {},\n  \"raw_Description_Length_nats\": {:.2},\n  \"star_tree_MDL_nats\": {:.2},\n  \"tree_MDL_nats\": {:.2},\n  \"network_MDL_nats\": {:.2},\n  \"compression_ratio_vs_star\": {:.4},\n  \"resolved_internal_splits\": {},\n  \"max_binary_splits\": {},\n  \"polytomy_nodes\": {},\n  \"certified_shunts\": {},\n  \"runtime_sec\": {:.4},\n  \"newick\": {},\n  \"internal_branches\": [\n{}\n  ],\n  \"shunts\": [\n{}\n  ]\n}}\n",
+        "{{\n  \"tool\": \"BUSHWHACKER\",\n  \"input\": {},\n  \"n_taxa\": {},\n  \"seq_len\": {},\n  \"raw_Description_Length_nats\": {:.2},\n  \"star_tree_MDL_nats\": {:.2},\n  \"tree_MDL_nats\": {:.2},\n  \"network_MDL_nats\": {:.2},\n  \"compression_ratio_vs_star\": {:.4},\n  \"resolved_internal_splits\": {},\n  \"max_binary_splits\": {},\n  \"polytomy_nodes\": {},\n  \"certified_shunts\": {},\n  \"runtime_sec\": {:.4},\n  \"newick\": {},\n  \"binary_newick\": {},\n  \"internal_branches\": [\n{}\n  ],\n  \"shunts\": [\n{}\n  ]\n}}\n",
         json_escape(fasta_path),
         res.n_taxa,
         res.n_sites,
@@ -118,6 +118,7 @@ fn serialize_json(res: &BushwhackerResult, fasta_path: &str) -> String {
         res.shunts.len(),
         res.runtime_sec,
         json_escape(&res.newick),
+        json_escape(&res.binary_newick),
         internal_branches.join(",\n"),
         shunt_entries.join(",\n")
     )

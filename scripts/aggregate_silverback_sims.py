@@ -51,7 +51,15 @@ def main():
             grouped[scen_id][method].append(mdata)
 
     rows = []
-    method_order = ["Bushwhacker", "IQTREE2", "IQTREE2_Polytomy", "RAxML_NG", "FastTree2", "BioNJ"]
+    method_order = [
+        "Bushwhacker",
+        "Bushwhacker_Binary",
+        "IQTREE2",
+        "IQTREE2_Polytomy",
+        "RAxML_NG",
+        "FastTree2",
+        "BioNJ",
+    ]
 
     for scen_id in sorted(grouped.keys()):
         meta = scen_meta[scen_id]
@@ -66,6 +74,7 @@ def main():
             rec2_m, rec2_s = mean_std([r["recall_ge2"] for r in reps])
             fp_m, fp_s = mean_std([r["fp"] for r in reps])
             fn_m, fn_s = mean_std([r["fn"] for r in reps])
+            rf_m, rf_s = mean_std([r["fp"] + r["fn"] for r in reps])
             tp_m, _ = mean_std([r["tp"] for r in reps])
             est_m, _ = mean_std([r["n_est_splits"] for r in reps])
             true_m, _ = mean_std([r["n_true_splits"] for r in reps])
@@ -87,6 +96,8 @@ def main():
                     "tp_mean": round(tp_m, 1),
                     "fp_mean": round(fp_m, 2),
                     "fn_mean": round(fn_m, 2),
+                    "rf_mean": round(rf_m, 2),
+                    "rf_sd": round(rf_s, 2),
                     "precision_mean": round(prec_m, 4),
                     "precision_sd": round(prec_s, 4),
                     "recall_all_mean": round(rec_m, 4),
@@ -110,13 +121,13 @@ def main():
 
     # Print formatted table
     print(
-        f"{'Scenario':<26} | {'Method':<16} | {'Reps':>4} | {'Splits':>11} | {'FP':>6} | {'Prec':>6} | {'Rec(all)':>8} | {'Rec(>=1)':>8} | {'Rec(>=2)':>8} | {'nRF':>6} | {'Time(s)':>8}"
+        f"{'Scenario':<26} | {'Method':<18} | {'Reps':>4} | {'Splits':>11} | {'RF':>7} | {'nRF':>6} | {'FP':>6} | {'FN':>6} | {'Prec':>6} | {'Rec(all)':>8} | {'Rec(>=2)':>8} | {'Time(s)':>8}"
     )
-    print("-" * 132)
+    print("-" * 144)
     for r in rows:
         sp_str = f"{r['est_splits']:.0f}/{r['true_splits']:.0f}"
         print(
-            f"{r['scenario_id']:<26} | {r['method']:<16} | {r['n_reps']:>4d} | {sp_str:>11} | {r['fp_mean']:>6.1f} | {r['precision_mean']:>6.3f} | {r['recall_all_mean']:>8.3f} | {r['recall_ge1_mean']:>8.3f} | {r['recall_ge2_mean']:>8.3f} | {r['nrf_mean']:>6.3f} | {r['runtime_s_mean']:>8.3f}"
+            f"{r['scenario_id']:<26} | {r['method']:<18} | {r['n_reps']:>4d} | {sp_str:>11} | {r['rf_mean']:>7.1f} | {r['nrf_mean']:>6.3f} | {r['fp_mean']:>6.1f} | {r['fn_mean']:>6.1f} | {r['precision_mean']:>6.3f} | {r['recall_all_mean']:>8.3f} | {r['recall_ge2_mean']:>8.3f} | {r['runtime_s_mean']:>8.3f}"
         )
 
 

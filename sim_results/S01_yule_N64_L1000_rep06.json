@@ -21,7 +21,7 @@
       "recall_ge2": 0.94,
       "f1": 0.88496,
       "nrf": 0.10656,
-      "runtime_s": 0.4602,
+      "runtime_s": 0.6167,
       "certified_shunts": 0,
       "shunt_modes": []
     },
@@ -104,6 +104,22 @@
       "f1": 0.90164,
       "nrf": 0.09836,
       "runtime_s": 1.849
+    },
+    "Bushwhacker_Binary": {
+      "n_true_splits": 61,
+      "n_true_ge1": 61,
+      "n_true_ge2": 50,
+      "n_est_splits": 61,
+      "tp": 51,
+      "fp": 10,
+      "fn": 10,
+      "precision": 0.83607,
+      "recall": 0.83607,
+      "recall_ge1": 0.83607,
+      "recall_ge2": 0.94,
+      "f1": 0.83607,
+      "nrf": 0.16393,
+      "runtime_s": 0.6167
     }
   }
 }

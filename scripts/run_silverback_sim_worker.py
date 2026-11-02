@@ -238,6 +238,51 @@ SCENARIOS = [
         "model": "GTR{1.5/3.0/0.8/1.2/4.0}+F{0.30/0.20/0.20/0.30}+G4{0.5}",
         "run_raxml": True,
     },
+    # Extended Regime C Gene-Length Ramp (L = 100, 1000, 8000, 16000 at N=200)
+    {
+        "id": "S08b_len_N200_L100",
+        "regime": "C_Sequence_Length",
+        "desc": "Ultra-Short Alignment N=200, L=100 bp, GTR+F+G4",
+        "tree_spec": "RANDOM{yh,200}",
+        "rlen": ("0.001", "0.02", "0.10"),
+        "N": 200,
+        "L": 100,
+        "model": "GTR{1.5/3.0/0.8/1.2/4.0}+F{0.30/0.20/0.20/0.30}+G4{0.5}",
+        "run_raxml": True,
+    },
+    {
+        "id": "S10b_len_N200_L1000",
+        "regime": "C_Sequence_Length",
+        "desc": "Baseline Alignment N=200, L=1000 bp, GTR+F+G4",
+        "tree_spec": "RANDOM{yh,200}",
+        "rlen": ("0.001", "0.02", "0.10"),
+        "N": 200,
+        "L": 1000,
+        "model": "GTR{1.5/3.0/0.8/1.2/4.0}+F{0.30/0.20/0.20/0.30}+G4{0.5}",
+        "run_raxml": True,
+    },
+    {
+        "id": "S12b_len_N200_L8000",
+        "regime": "C_Sequence_Length",
+        "desc": "Very Long Alignment N=200, L=8000 bp, GTR+F+G4",
+        "tree_spec": "RANDOM{yh,200}",
+        "rlen": ("0.001", "0.02", "0.10"),
+        "N": 200,
+        "L": 8000,
+        "model": "GTR{1.5/3.0/0.8/1.2/4.0}+F{0.30/0.20/0.20/0.30}+G4{0.5}",
+        "run_raxml": True,
+    },
+    {
+        "id": "S12c_len_N200_L16000",
+        "regime": "C_Sequence_Length",
+        "desc": "Ultra-Long Alignment N=200, L=16000 bp, GTR+F+G4",
+        "tree_spec": "RANDOM{yh,200}",
+        "rlen": ("0.001", "0.02", "0.10"),
+        "N": 200,
+        "L": 16000,
+        "model": "GTR{1.5/3.0/0.8/1.2/4.0}+F{0.30/0.20/0.20/0.30}+G4{0.5}",
+        "run_raxml": True,
+    },
 ]
 
 
@@ -600,17 +645,27 @@ def run_task(scenario_idx: int, rep_idx: int, base_dir: Path, out_dir: Path, bw_
         m_bw["certified_shunts"] = bw_meta.get("certified_shunts", 0)
         m_bw["shunt_modes"] = [s.get("mode") for s in bw_meta.get("shunts", [])]
 
+        m_bw_bin = None
+        if "binary_newick" in bw_meta and bw_meta["binary_newick"]:
+            bw_bin_nwk = tmp_path / "bw_bin.nwk"
+            bw_bin_nwk.write_text(bw_meta["binary_newick"] + "\n")
+            m_bw_bin = evaluate_tree(str(bw_bin_nwk), true_splits, leaf_to_id, L, bw_meta.get("runtime_sec", t_bw))
+
         out_dir.mkdir(parents=True, exist_ok=True)
         out_file = out_dir / f"{scen_id}_rep{rep_idx:02d}.json"
         if bw_only:
             if out_file.exists():
                 existing = json.loads(out_file.read_text())
                 existing["methods"]["Bushwhacker"] = m_bw
+                if m_bw_bin is not None:
+                    existing["methods"]["Bushwhacker_Binary"] = m_bw_bin
                 out_file.write_text(json.dumps(existing, indent=2) + "\n")
                 print(f"Updated Bushwhacker for {scen_id} rep {rep_idx}: saved to {out_file}")
             return
 
         results["methods"]["Bushwhacker"] = m_bw
+        if m_bw_bin is not None:
+            results["methods"]["Bushwhacker_Binary"] = m_bw_bin
 
         # 2. FastTree 2
         ft_nwk = tmp_path / "ft.nwk"
@@ -628,7 +683,7 @@ def run_task(scenario_idx: int, rep_idx: int, base_dir: Path, out_dir: Path, bw_
 
         # 3. IQ-TREE 2 (Standard GTR+F+G4) + BioNJ
         iq_prefix = tmp_path / "iq"
-        iq_extra = ["-fast"] if N >= 512 else []
+        iq_extra = ["-fast"] if (N >= 512 or L >= 8000) else []
         t0 = time.perf_counter()
         subprocess.run(
             [

@@ -11,17 +11,17 @@
       "n_true_splits": 197,
       "n_true_ge1": 161,
       "n_true_ge2": 141,
-      "n_est_splits": 124,
-      "tp": 115,
+      "n_est_splits": 125,
+      "tp": 116,
       "fp": 9,
-      "fn": 82,
-      "precision": 0.92742,
-      "recall": 0.58376,
+      "fn": 81,
+      "precision": 0.928,
+      "recall": 0.58883,
       "recall_ge1": 0.67081,
       "recall_ge2": 0.7305,
-      "f1": 0.71651,
-      "nrf": 0.23096,
-      "runtime_s": 0.6006,
+      "f1": 0.7205,
+      "nrf": 0.22843,
+      "runtime_s": 0.7119,
       "certified_shunts": 0,
       "shunt_modes": []
     },
@@ -88,6 +88,22 @@
       "f1": 0.87399,
       "nrf": 0.11929,
       "runtime_s": 35.9795
+    },
+    "Bushwhacker_Binary": {
+      "n_true_splits": 197,
+      "n_true_ge1": 161,
+      "n_true_ge2": 141,
+      "n_est_splits": 197,
+      "tp": 154,
+      "fp": 43,
+      "fn": 43,
+      "precision": 0.78173,
+      "recall": 0.78173,
+      "recall_ge1": 0.86335,
+      "recall_ge2": 0.88652,
+      "f1": 0.78173,
+      "nrf": 0.21827,
+      "runtime_s": 0.7119
     }
   }
 }

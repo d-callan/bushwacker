@@ -149,6 +149,7 @@ pub struct BushwhackerResult {
     pub n_sites: usize,
     pub l_eff: f64,
     pub newick: String,
+    pub binary_newick: String,
     pub adjacency: BTreeMap<usize, Vec<usize>>,
     pub node_labels: BTreeMap<usize, String>,
     pub branches: Vec<BranchRecord>,
@@ -1073,6 +1074,9 @@ impl BushwhackerEngine {
             tv_cost,
         );
 
+        // Serialize the fully resolved binary backbone tree before Step 3 MDL polytomy contraction
+        let binary_newick = self.serialize_newick(&adj, names, &[], n);
+
         // Step 3: MDL Edge Contraction + Polytomy Hub Clique Expansion
         let (adj_c, mut branches, _, edge_mutations) = self.contract_unsupported_edges_mdl(
             adj,
@@ -1194,6 +1198,7 @@ impl BushwhackerEngine {
             n_sites: l,
             l_eff,
             newick,
+            binary_newick,
             adjacency: adj,
             node_labels: full_labels,
             branches,
