@@ -1074,8 +1074,7 @@ impl BushwhackerEngine {
             tv_cost,
         );
 
-        // Serialize the fully resolved binary backbone tree before Step 3 MDL polytomy contraction
-        let binary_newick = self.serialize_newick(&adj, names, &[], n);
+        let pre_step3_adj = adj.clone();
 
         // Step 3: MDL Edge Contraction + Polytomy Hub Clique Expansion
         let (adj_c, mut branches, _, edge_mutations) = self.contract_unsupported_edges_mdl(
@@ -1093,6 +1092,23 @@ impl BushwhackerEngine {
             true,
         );
         adj = adj_c;
+
+        // Build the strict binary refinement of the MDL-certified tree `adj` (preserving 100% of
+        // certified positive-MDL splits including hub expansions, while resolving any remaining
+        // degree >= 4 polytomy hubs via compatible pre-contraction splits and ancestral Fitch states).
+        let bin_adj = self.build_binary_refinement_from_mdl(
+            &adj,
+            &pre_step3_adj,
+            &bitmasks,
+            &terminal_loads,
+            n,
+            l,
+            l_eff,
+            ti_cost,
+            tv_cost,
+            &tree_weights,
+        );
+        let binary_newick = self.serialize_newick(&bin_adj, names, &[], n);
         // Refresh node labels for any hub-expanded nodes
         let mut full_labels = node_labels;
         for &u in adj.keys() {
@@ -3319,6 +3335,8 @@ impl BushwhackerEngine {
         s_mask: &[u8],
         x_mask: &[u8],
         y_mask: &[u8],
+        ti_w: f64,
+        tv_w: f64,
         site_weights: &[f64],
     ) -> f64 {
         let l = s_mask.len();
@@ -3359,7 +3377,8 @@ impl BushwhackerEngine {
                             bx | by
                         };
                         if b2 != 15 && (b1 & b2) == 0 {
-                            cost += site_weights[i];
+                            let is_ti = (((b1 | (b1 >> 2)) & (b2 | (b2 >> 2))) & 3) != 0;
+                            cost += (if is_ti { ti_w } else { tv_w }) * site_weights[i];
                         }
                     }
                 }
@@ -3380,7 +3399,8 @@ impl BushwhackerEngine {
                     bx | by
                 };
                 if b2 != 15 && (b1 & b2) == 0 {
-                    cost += site_weights[i];
+                    let is_ti = (((b1 | (b1 >> 2)) & (b2 | (b2 >> 2))) & 3) != 0;
+                    cost += (if is_ti { ti_w } else { tv_w }) * site_weights[i];
                 }
             }
         }
@@ -3468,6 +3488,11 @@ impl BushwhackerEngine {
             }
         }
 
+        let mean_sub = (0.5 * (ti_cost + tv_cost)).max(1e-6);
+        let ti_w = (ti_cost / mean_sub).clamp(0.85, 1.05);
+        let tv_w = (tv_cost / mean_sub).clamp(0.95, 1.18);
+        let min_step = 0.85 * ti_w;
+
         let mut any_moved = false;
         for idx in 0..m {
             let (s, u) = movable[idx];
@@ -3492,8 +3517,9 @@ impl BushwhackerEngine {
             let Some(tb) = states.get(&(b, u)).cloned() else {
                 continue;
             };
-            let base_cost = Self::fitch_insert_cost_pair(&ts.0, &ta.0, &tb.0, site_weights);
-            if base_cost <= 1.0 {
+            let base_cost =
+                Self::fitch_insert_cost_pair(&ts.0, &ta.0, &tb.0, ti_w, tv_w, site_weights);
+            if base_cost <= min_step {
                 continue;
             }
 
@@ -3574,11 +3600,12 @@ impl BushwhackerEngine {
             cand_edges.dedup();
 
             // Pre-screen candidate edges using zero-allocation bitwise Fitch cost
-            let best_pre_cost = base_cost - 1.0;
+            let best_pre_cost = base_cost - min_step;
             let mut top_cands: Vec<(f64, usize, usize)> = Vec::new();
             for (x, y) in cand_edges {
                 if let (Some(tx), Some(ty)) = (states.get(&(x, y)), states.get(&(y, x))) {
-                    let c_xy = Self::fitch_insert_cost_pair(&ts.0, &tx.0, &ty.0, site_weights);
+                    let c_xy =
+                        Self::fitch_insert_cost_pair(&ts.0, &tx.0, &ty.0, ti_w, tv_w, site_weights);
                     if c_xy < best_pre_cost {
                         top_cands.push((c_xy, x, y));
                     }
@@ -3617,6 +3644,8 @@ impl BushwhackerEngine {
                 &ts.0,
                 &states[&(a, b)].0,
                 &states[&(b, a)].0,
+                ti_w,
+                tv_w,
                 site_weights,
             );
 
@@ -3651,44 +3680,50 @@ impl BushwhackerEngine {
                         Vec::new()
                     };
                     let g_base = if x_ch.len() >= 2 && y_ch.len() >= 2 {
-                        self.compute_split_mdl_gain_from_children(
-                            &x_ch,
-                            &y_ch,
-                            l,
-                            l_eff,
-                            ti_cost,
-                            tv_cost,
-                            site_weights,
-                        )
-                        .0
+                        let raw = self
+                            .compute_split_mdl_gain_from_children(
+                                &x_ch,
+                                &y_ch,
+                                l,
+                                l_eff,
+                                ti_cost,
+                                tv_cost,
+                                site_weights,
+                            )
+                            .0;
+                        (raw + split_topology_cost_nats(x_ch.len(), y_ch.len())).max(0.0)
                     } else {
                         0.0
                     };
                     let g_ux = if x_ch.len() >= 2 {
-                        self.compute_split_mdl_gain_from_children(
-                            &[ts.clone(), t_ey.clone()],
-                            &x_ch,
-                            l,
-                            l_eff,
-                            ti_cost,
-                            tv_cost,
-                            site_weights,
-                        )
-                        .0
+                        let raw = self
+                            .compute_split_mdl_gain_from_children(
+                                &[ts.clone(), t_ey.clone()],
+                                &x_ch,
+                                l,
+                                l_eff,
+                                ti_cost,
+                                tv_cost,
+                                site_weights,
+                            )
+                            .0;
+                        (raw + split_topology_cost_nats(2, x_ch.len())).max(0.0)
                     } else {
                         0.0
                     };
                     let g_uy = if y_ch.len() >= 2 {
-                        self.compute_split_mdl_gain_from_children(
-                            &[ts.clone(), t_ex.clone()],
-                            &y_ch,
-                            l,
-                            l_eff,
-                            ti_cost,
-                            tv_cost,
-                            site_weights,
-                        )
-                        .0
+                        let raw = self
+                            .compute_split_mdl_gain_from_children(
+                                &[ts.clone(), t_ex.clone()],
+                                &y_ch,
+                                l,
+                                l_eff,
+                                ti_cost,
+                                tv_cost,
+                                site_weights,
+                            )
+                            .0;
+                        (raw + split_topology_cost_nats(2, y_ch.len())).max(0.0)
                     } else {
                         0.0
                     };
@@ -3697,13 +3732,20 @@ impl BushwhackerEngine {
 
             let old_mdl_delta = eval_edge_mdl_delta(a, b, adj, states);
             let mut best_edge = (a, b);
-            let mut best_exact_cost = exact_old_cost - 1.0;
+            let mut best_exact_cost = exact_old_cost - min_step;
             let mut best_mdl_delta = old_mdl_delta + 0.10;
             for (_, x, y) in top_cands {
                 if adj.get(&x).map(|v| v.contains(&y)).unwrap_or(false) {
                     if let (Some(tx), Some(ty)) = (states.get(&(x, y)), states.get(&(y, x))) {
-                        let c_xy = Self::fitch_insert_cost_pair(&ts.0, &tx.0, &ty.0, site_weights);
-                        if c_xy <= exact_old_cost - 1.0 {
+                        let c_xy = Self::fitch_insert_cost_pair(
+                            &ts.0,
+                            &tx.0,
+                            &ty.0,
+                            ti_w,
+                            tv_w,
+                            site_weights,
+                        );
+                        if c_xy <= exact_old_cost - min_step {
                             let cand_mdl_delta = eval_edge_mdl_delta(x, y, adj, states);
                             if cand_mdl_delta > best_mdl_delta
                                 || ((cand_mdl_delta - best_mdl_delta).abs() <= 0.10
@@ -4186,6 +4228,197 @@ impl BushwhackerEngine {
                 );
             }
         }
+    }
+
+    /// Construct a strictly binary tree (`N - 3` internal splits) that is a guaranteed topological
+    /// refinement of the MDL-certified tree `adj_mdl`.
+    ///
+    /// By Buneman's Split Compatibility Theorem, any split from `pre_step3_adj` refines a polytomy
+    /// hub `h` of degree `d >= 4` in `adj_mdl` without conflicting with any certified split of
+    /// `adj_mdl` if and only if its leaf set is a union of `k` (`2 <= k <= d - 2`) neighbor
+    /// component leaf-sets of `h`. Any remaining degree >= 4 hub (where `expand_polytomy_hubs_mdl`
+    /// introduced a new positive-MDL split crossing `pre_step3_adj`) is resolved via ancestral
+    /// Fitch-state quartet MDL / Neighbor-Joining.
+    #[allow(clippy::too_many_arguments)]
+    fn build_binary_refinement_from_mdl(
+        &self,
+        adj_mdl: &BTreeMap<usize, Vec<usize>>,
+        pre_step3_adj: &BTreeMap<usize, Vec<usize>>,
+        bitmasks: &[u8],
+        terminal_loads: &[f64],
+        n: usize,
+        l: usize,
+        l_eff: f64,
+        ti_cost: f64,
+        tv_cost: f64,
+        site_weights: &[f64],
+    ) -> BTreeMap<usize, Vec<usize>> {
+        if n <= 3 || !adj_mdl.iter().any(|(&u, nbs)| u >= n && nbs.len() >= 4) {
+            return adj_mdl.clone();
+        }
+        let n_words = (n + 63) / 64;
+        let collect_leaf_bits =
+            |start: usize, blocked: usize, graph: &BTreeMap<usize, Vec<usize>>| -> Vec<u64> {
+                let mut bits = vec![0_u64; n_words];
+                let mut stack = vec![start];
+                let mut vis = HashSet::new();
+                vis.insert(blocked);
+                vis.insert(start);
+                while let Some(curr) = stack.pop() {
+                    if curr < n {
+                        bits[curr >> 6] |= 1_u64 << (curr & 63);
+                    } else if let Some(nbs) = graph.get(&curr) {
+                        for &nx in nbs {
+                            if vis.insert(nx) {
+                                stack.push(nx);
+                            }
+                        }
+                    }
+                }
+                bits
+            };
+
+        let mut pre_splits: Vec<Vec<u64>> = Vec::new();
+        for (&u, nbs) in pre_step3_adj {
+            if u >= n {
+                for &v in nbs {
+                    if u < v && v >= n {
+                        let b = collect_leaf_bits(u, v, pre_step3_adj);
+                        let pop: u32 = b.iter().map(|w| w.count_ones()).sum();
+                        if (pop as usize) >= 2 && (pop as usize) <= n - 2 {
+                            pre_splits.push(b);
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut bin_adj = adj_mdl.clone();
+        let mut next_id = bin_adj.keys().copied().max().unwrap_or(n) + 1;
+
+        loop {
+            let Some((&h, _)) = bin_adj.iter().find(|(&u, nbs)| u >= n && nbs.len() >= 4) else {
+                break;
+            };
+            let nbs = bin_adj[&h].clone();
+            let d = nbs.len();
+            let comp_masks: Vec<Vec<u64>> = nbs
+                .iter()
+                .map(|&c| collect_leaf_bits(c, h, &bin_adj))
+                .collect();
+
+            let mut matched_subset: Option<Vec<usize>> = None;
+            for sp in &pre_splits {
+                let mut u_set = Vec::new();
+                let mut clean = true;
+                for (r, cm) in comp_masks.iter().enumerate() {
+                    let mut has_in = false;
+                    let mut has_out = false;
+                    for w in 0..n_words {
+                        if (cm[w] & sp[w]) != 0 {
+                            has_in = true;
+                        }
+                        if (cm[w] & !sp[w]) != 0 {
+                            has_out = true;
+                        }
+                    }
+                    if has_in && has_out {
+                        clean = false;
+                        break;
+                    }
+                    if has_in {
+                        u_set.push(r);
+                    }
+                }
+                if clean && u_set.len() >= 2 && u_set.len() <= d - 2 {
+                    matched_subset = Some(u_set);
+                    break;
+                }
+            }
+
+            let chosen_u: Vec<usize> = if let Some(u_set) = matched_subset {
+                u_set
+            } else {
+                let states = self.compute_all_directed_fitch_states(
+                    &bin_adj,
+                    bitmasks,
+                    n,
+                    l,
+                    terminal_loads,
+                    l_eff,
+                );
+                let nb_states: Vec<(Vec<u8>, f64)> =
+                    nbs.iter().map(|&c| states[&(c, h)].clone()).collect();
+                if d == 4 {
+                    let pairings = [([0usize, 1], [2usize, 3]), ([0, 2], [1, 3]), ([0, 3], [1, 2])];
+                    let mut best_p = vec![0usize, 1];
+                    let mut best_g = f64::NEG_INFINITY;
+                    for (p1, p2) in pairings {
+                        let (g, _, _) = self.compute_split_mdl_gain_from_children(
+                            &[nb_states[p1[0]].clone(), nb_states[p1[1]].clone()],
+                            &[nb_states[p2[0]].clone(), nb_states[p2[1]].clone()],
+                            l,
+                            l_eff,
+                            ti_cost,
+                            tv_cost,
+                            site_weights,
+                        );
+                        if g > best_g {
+                            best_g = g;
+                            best_p = vec![p1[0], p1[1]];
+                        }
+                    }
+                    best_p
+                } else {
+                    let mut d_mat = vec![0.0_f64; d * d];
+                    let mut row_sums = vec![0.0_f64; d];
+                    for a in 0..d {
+                        for b in (a + 1)..d {
+                            let s1 = &nb_states[a].0;
+                            let s2 = &nb_states[b].0;
+                            let mut w_diff = 0.0_f64;
+                            for s in 0..l {
+                                let b1 = s1[s];
+                                let b2 = s2[s];
+                                if b1 != 15 && b2 != 15 && (b1 & b2) == 0 {
+                                    w_diff += site_weights[s];
+                                }
+                            }
+                            d_mat[a * d + b] = w_diff;
+                            d_mat[b * d + a] = w_diff;
+                            row_sums[a] += w_diff;
+                            row_sums[b] += w_diff;
+                        }
+                    }
+                    let d_m2 = (d as f64) - 2.0;
+                    let mut best_q = f64::INFINITY;
+                    let mut best_pair = (0usize, 1usize);
+                    for a in 0..d {
+                        for b in (a + 1)..d {
+                            let q = d_m2 * d_mat[a * d + b] - row_sums[a] - row_sums[b];
+                            if q < best_q {
+                                best_q = q;
+                                best_pair = (a, b);
+                            }
+                        }
+                    }
+                    vec![best_pair.0, best_pair.1]
+                }
+            };
+
+            let new_node = next_id;
+            next_id += 1;
+            bin_adj.insert(new_node, vec![h]);
+            bin_adj.get_mut(&h).unwrap().push(new_node);
+            for r in chosen_u {
+                let c_node = nbs[r];
+                bin_adj.get_mut(&h).unwrap().retain(|&x| x != c_node);
+                bin_adj.get_mut(&c_node).unwrap().retain(|&x| x != h);
+                bin_adj.get_mut(&new_node).unwrap().push(c_node);
+                bin_adj.get_mut(&c_node).unwrap().push(new_node);
+            }
+        }
+        bin_adj
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -4712,6 +4945,7 @@ impl BushwhackerEngine {
 
         let mut best_data_gain = f64::NEG_INFINITY;
         let mut best_idx = 0usize;
+        let mut first_thresh = 1.0_f64;
 
         for (idx, &(sav, _, subst_s, w_s)) in pos_sites.iter().enumerate() {
             let m = (idx + 1) as f64;
@@ -4727,6 +4961,9 @@ impl BushwhackerEngine {
                 cum_pos_cost = raw_pos;
             }
             let branch_cost = header + cum_pos_cost + cum_subst;
+            if idx == 0 {
+                first_thresh = (branch_cost + topo_cost).max(1.0);
+            }
             let net_gain = cum_sav - branch_cost;
             if net_gain > best_data_gain {
                 best_data_gain = net_gain;
@@ -4736,7 +4973,14 @@ impl BushwhackerEngine {
 
         let m_opt = (best_idx + 1) as f64;
         let chosen_sites: Vec<usize> = pos_sites[..=best_idx].iter().map(|x| x.1).collect();
-        (best_data_gain - topo_cost, m_opt, chosen_sites)
+        let raw_gain = best_data_gain - topo_cost;
+        let final_gain = if raw_gain > 0.0 {
+            raw_gain
+        } else {
+            let frac = (pos_sites[0].0 / first_thresh).clamp(0.0, 0.98);
+            -topo_cost * (1.0 - 0.95 * frac)
+        };
+        (final_gain, m_opt, chosen_sites)
     }
 
     pub fn reconstruct_nodal_states_and_mutations(
