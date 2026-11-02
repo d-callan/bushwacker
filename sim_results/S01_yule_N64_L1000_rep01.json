@@ -11,17 +11,17 @@
       "n_true_splits": 61,
       "n_true_ge1": 61,
       "n_true_ge2": 57,
-      "n_est_splits": 56,
-      "tp": 52,
+      "n_est_splits": 59,
+      "tp": 55,
       "fp": 4,
-      "fn": 9,
-      "precision": 0.92857,
-      "recall": 0.85246,
-      "recall_ge1": 0.85246,
-      "recall_ge2": 0.89474,
-      "f1": 0.88889,
-      "nrf": 0.10656,
-      "runtime_s": 0.6599,
+      "fn": 6,
+      "precision": 0.9322,
+      "recall": 0.90164,
+      "recall_ge1": 0.90164,
+      "recall_ge2": 0.92982,
+      "f1": 0.91667,
+      "nrf": 0.08197,
+      "runtime_s": 0.2954,
       "certified_shunts": 0,
       "shunt_modes": []
     },
@@ -119,7 +119,7 @@
       "recall_ge2": 0.92982,
       "f1": 0.91803,
       "nrf": 0.08197,
-      "runtime_s": 0.6599
+      "runtime_s": 0.2954
     }
   }
 }

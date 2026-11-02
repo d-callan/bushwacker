@@ -1442,6 +1442,8 @@ impl BushwhackerEngine {
 
         let mut mod_dist = vec![0.0_f64; l];
         let mut mod_tree = vec![0.0_f64; l];
+        let mut var_dist_sum = 0.0_f64;
+        let mut var_dist_base_sum = 0.0_f64;
 
         for s in 0..l {
             let w_mt = if frac_multi > 0.50 { 1.0 } else { w_mult[s] };
@@ -1455,6 +1457,20 @@ impl BushwhackerEngine {
             };
             mod_dist[s] = eff_d * site_coh[s].powf(1.25) * w_mult[s];
             mod_tree[s] = eff_t * coh_tree_factor;
+            if n_states[s] >= 2 {
+                var_dist_sum += mod_dist[s];
+                var_dist_base_sum += eff_d;
+            }
+        }
+        // Normalize variable-site distance weights so their average scale matches invariant sites,
+        // preserving relative Four-Gamete compatibility weights without biasing P/Q saturation fractions.
+        if var_dist_sum > 1e-6 && var_dist_base_sum > 1e-6 {
+            let norm_factor = var_dist_base_sum / var_dist_sum;
+            for s in 0..l {
+                if n_states[s] >= 2 {
+                    mod_dist[s] *= norm_factor;
+                }
+            }
         }
         (mod_dist, mod_tree)
     }
@@ -1537,7 +1553,7 @@ impl BushwhackerEngine {
             .collect()
     }
 
-    /// 64-site bit-plane SIMD weighted Jukes-Cantor distance using hardware TZCNT/BLSR.
+    /// 64-site bit-plane SIMD weighted Jin-Nei (K80 + Gamma) distance using hardware TZCNT/BLSR.
     #[inline]
     fn compute_pair_jc_dist_packed(
         pi: &PackedSeq64,
@@ -1545,9 +1561,11 @@ impl BushwhackerEngine {
         site_weights: &[f64],
         word_weight_sums: &[f64],
         l_eff: f64,
+        inv_alpha: f64,
     ) -> f64 {
         let mut w_valid = 0.0_f64;
-        let mut w_diffs = 0.0_f64;
+        let mut w_ti = 0.0_f64;
+        let mut w_tv = 0.0_f64;
         let n_words = pi.words.len();
         for w_idx in 0..n_words {
             let wi = pi.words[w_idx];
@@ -1574,35 +1592,273 @@ impl BushwhackerEngine {
                 }
             }
             let same = (wi.b0 & wj.b0) | (wi.b1 & wj.b1) | (wi.b2 & wj.b2) | (wi.b3 & wj.b3);
-            let mut dm = valid_both & !same;
-            while dm != 0 {
-                let tz = dm.trailing_zeros() as usize;
-                w_diffs += site_weights[base + tz];
-                dm &= dm - 1;
+            let diff = valid_both & !same;
+            if diff != 0 {
+                let ri = wi.b0 | wi.b2;
+                let rj = wj.b0 | wj.b2;
+                let mut tvm = diff & (ri ^ rj);
+                let mut tim = diff & !tvm;
+                while tim != 0 {
+                    let tz = tim.trailing_zeros() as usize;
+                    w_ti += site_weights[base + tz];
+                    tim &= tim - 1;
+                }
+                while tvm != 0 {
+                    let tz = tvm.trailing_zeros() as usize;
+                    w_tv += site_weights[base + tz];
+                    tvm &= tvm - 1;
+                }
             }
         }
-        let p_hat = (w_diffs / w_valid.max(1.0)).clamp(0.0, 0.745);
-        -0.75 * (1.0 - (4.0 / 3.0) * p_hat).ln() * l_eff
+        let denom = w_valid.max(1.0);
+        let p_ti = (w_ti / denom).clamp(0.0, 0.70);
+        let q_tv = (w_tv / denom).clamp(0.0, 0.70);
+        let a1 = (1.0 - 2.0 * p_ti - q_tv).clamp(0.02, 1.0);
+        let a2 = (1.0 - 2.0 * q_tv).clamp(0.02, 1.0);
+        if inv_alpha <= 1e-4 {
+            (-0.5 * a1.ln() - 0.25 * a2.ln()) * l_eff
+        } else {
+            let alpha = 1.0 / inv_alpha;
+            alpha * (0.5 * (a1.powf(-inv_alpha) - 1.0) + 0.25 * (a2.powf(-inv_alpha) - 1.0)) * l_eff
+        }
     }
 
-    /// 64-site bit-plane SIMD unweighted Jukes-Cantor distance using hardware POPCNT.
+    /// 64-site bit-plane SIMD unweighted Jin-Nei (K80 + Gamma) distance using hardware POPCNT.
     #[inline]
     fn compute_pair_unweighted_jc_dist_packed(
         pi: &PackedSeq64,
         pj: &PackedSeq64,
         l_eff: f64,
+        inv_alpha: f64,
     ) -> f64 {
         let mut n_valid = 0usize;
-        let mut n_same = 0usize;
+        let mut n_ti = 0usize;
+        let mut n_tv = 0usize;
         for (wi, wj) in pi.words.iter().zip(&pj.words) {
             let valid_both = wi.valid & wj.valid;
             let same = (wi.b0 & wj.b0) | (wi.b1 & wj.b1) | (wi.b2 & wj.b2) | (wi.b3 & wj.b3);
+            let diff = valid_both & !same;
+            let ri = wi.b0 | wi.b2;
+            let rj = wj.b0 | wj.b2;
+            let tv = diff & (ri ^ rj);
+            let ti = diff & !tv;
             n_valid += valid_both.count_ones() as usize;
-            n_same += same.count_ones() as usize;
+            n_ti += ti.count_ones() as usize;
+            n_tv += tv.count_ones() as usize;
         }
-        let n_diffs = n_valid.saturating_sub(n_same);
-        let p_hat = ((n_diffs as f64) / (n_valid.max(1) as f64)).clamp(0.0, 0.745);
-        -0.75 * (1.0 - (4.0 / 3.0) * p_hat).ln() * l_eff
+        let denom = n_valid.max(1) as f64;
+        let p_ti = ((n_ti as f64) / denom).clamp(0.0, 0.70);
+        let q_tv = ((n_tv as f64) / denom).clamp(0.0, 0.70);
+        let a1 = (1.0 - 2.0 * p_ti - q_tv).clamp(0.02, 1.0);
+        let a2 = (1.0 - 2.0 * q_tv).clamp(0.02, 1.0);
+        if inv_alpha <= 1e-4 {
+            (-0.5 * a1.ln() - 0.25 * a2.ln()) * l_eff
+        } else {
+            let alpha = 1.0 / inv_alpha;
+            alpha * (0.5 * (a1.powf(-inv_alpha) - 1.0) + 0.25 * (a2.powf(-inv_alpha) - 1.0)) * l_eff
+        }
+    }
+
+    /// First-principles Negative Binomial / Laplace zero-class estimator for site-rate
+    /// dispersion `1 / alpha = Var(r_s)` on up to `K = min(N, 128)` stratified taxa.
+    ///
+    /// Under homogeneous site rates (`alpha -> infinity`), the Fitch step count `S_s` at site `s`
+    /// is a sum of Bernoulli branch indicators with `Var(S_s) <= E[S_s]`, returning `0.0` (exact K80).
+    /// Under heterogeneous rates `r_s ~ Gamma(alpha, alpha)`, `Var(S_s) > E[S_s]` and the
+    /// invariant-site Laplace transform `f_0 = E[exp(-r_s T)] = (1 + T/alpha)^(-alpha)`
+    /// together with the saturation-corrected Method-of-Moments yields `1 / alpha`.
+    fn estimate_site_rate_inv_alpha(
+        packed_vec: &[PackedSeq64],
+        bitmasks: &[u8],
+        n: usize,
+        l: usize,
+        l_eff: f64,
+    ) -> f64 {
+        if n < 6 || l < 20 {
+            return 0.0;
+        }
+        let k_sub = n.min(128);
+        let sub_idx: Vec<usize> = if n <= 128 {
+            (0..n).collect()
+        } else {
+            (0..k_sub).map(|i| (i * (n - 1)) / (k_sub - 1)).collect()
+        };
+        let cap = 2 * k_sub + 2;
+        let mut d = vec![0.0_f64; cap * cap];
+        for a in 0..k_sub {
+            let pa = &packed_vec[sub_idx[a]];
+            for b in (a + 1)..k_sub {
+                let pb = &packed_vec[sub_idx[b]];
+                let dist = Self::compute_pair_unweighted_jc_dist_packed(pa, pb, l_eff, 0.0);
+                d[a * cap + b] = dist;
+                d[b * cap + a] = dist;
+            }
+        }
+        let mut active: Vec<usize> = (0..k_sub).collect();
+        let mut row_sums = vec![0.0_f64; cap];
+        for a in 0..k_sub {
+            row_sums[a] = (0..k_sub).map(|b| d[a * cap + b]).sum();
+        }
+        let mut masks: Vec<Vec<u8>> = Vec::with_capacity(cap);
+        for &gi in &sub_idx {
+            masks.push(bitmasks[gi * l..(gi + 1) * l].to_vec());
+        }
+        let mut steps = vec![0_u16; l];
+        let chunks = l / 8;
+
+        while active.len() > 1 {
+            let k = active.len();
+            let (a_pos, b_pos) = if k > 2 {
+                let k_m2 = (k as f64) - 2.0;
+                let mut best_q = f64::INFINITY;
+                let mut best_p = (0usize, 1usize);
+                for a in 0..k {
+                    let la = active[a];
+                    let ra = row_sums[la];
+                    for b in (a + 1)..k {
+                        let lb = active[b];
+                        let q = k_m2 * d[la * cap + lb] - ra - row_sums[lb];
+                        if q < best_q {
+                            best_q = q;
+                            best_p = (a, b);
+                        }
+                    }
+                }
+                best_p
+            } else {
+                (0usize, 1usize)
+            };
+            let lu = active[a_pos];
+            let lv = active[b_pos];
+            let lw = masks.len();
+            let mut out = vec![0_u8; l];
+            {
+                let s1 = &masks[lu];
+                let s2 = &masks[lv];
+                for c in 0..chunks {
+                    let off = c * 8;
+                    let w1 = u64::from_ne_bytes(s1[off..off + 8].try_into().unwrap());
+                    let w2 = u64::from_ne_bytes(s2[off..off + 8].try_into().unwrap());
+                    let inter = w1 & w2;
+                    let zero_hi =
+                        !(inter.wrapping_add(0x7F7F_7F7F_7F7F_7F7F)) & 0x8080_8080_8080_8080;
+                    if zero_hi == 0 {
+                        out[off..off + 8].copy_from_slice(&inter.to_ne_bytes());
+                    } else {
+                        for i in off..(off + 8) {
+                            let b1 = s1[i];
+                            let b2 = s2[i];
+                            let m_and = b1 & b2;
+                            if m_and == 0 {
+                                out[i] = b1 | b2;
+                                if b1 != 15 && b2 != 15 {
+                                    steps[i] += 1;
+                                }
+                            } else {
+                                out[i] = m_and;
+                            }
+                        }
+                    }
+                }
+                for i in (chunks * 8)..l {
+                    let b1 = s1[i];
+                    let b2 = s2[i];
+                    let m_and = b1 & b2;
+                    if m_and == 0 {
+                        out[i] = b1 | b2;
+                        if b1 != 15 && b2 != 15 {
+                            steps[i] += 1;
+                        }
+                    } else {
+                        out[i] = m_and;
+                    }
+                }
+            }
+            masks.push(out);
+
+            let others: Vec<usize> = active
+                .iter()
+                .copied()
+                .filter(|&x| x != lu && x != lv)
+                .collect();
+            if k > 2 {
+                let k_m2 = (k as f64) - 2.0;
+                let d_uv = d[lu * cap + lv];
+                let limb_u = (0.5 * d_uv + (row_sums[lu] - row_sums[lv]) / (2.0 * k_m2)).max(0.0);
+                let limb_v = (d_uv - limb_u).max(0.0);
+                let mut rw = 0.0_f64;
+                for &lx in &others {
+                    let d_ux = d[lu * cap + lx];
+                    let d_vx = d[lv * cap + lx];
+                    let d_wx = (0.5 * (d_ux - limb_u + d_vx - limb_v)).max(0.0);
+                    d[lw * cap + lx] = d_wx;
+                    d[lx * cap + lw] = d_wx;
+                    row_sums[lx] += d_wx - d_ux - d_vx;
+                    rw += d_wx;
+                }
+                row_sums[lw] = rw;
+            }
+            active = others;
+            active.push(lw);
+        }
+
+        let lf = l as f64;
+        let mean_s: f64 = steps.iter().map(|&s| s as f64).sum::<f64>() / lf;
+        let var_s: f64 = steps
+            .iter()
+            .map(|&s| {
+                let df = (s as f64) - mean_s;
+                df * df
+            })
+            .sum::<f64>()
+            / lf;
+        if mean_s < 0.05 || var_s <= mean_s * 1.05 {
+            return 0.0;
+        }
+        let k_sat = 0.50 * (k_sub as f64);
+        let mut sum_m = 0.0_f64;
+        let mut m_vec = Vec::with_capacity(l);
+        let mut zero_cnt = 0usize;
+        for &s in &steps {
+            if s == 0 {
+                zero_cnt += 1;
+            }
+            let p_s = ((s as f64) / k_sat).clamp(0.0, 0.92);
+            let m_s = (-k_sat * (1.0 - p_s).ln() - 0.5 * p_s).max(0.0);
+            sum_m += m_s;
+            m_vec.push(m_s);
+        }
+        let mean_m = sum_m / lf;
+        let var_m: f64 = m_vec
+            .iter()
+            .map(|&m| {
+                let df = m - mean_m;
+                df * df
+            })
+            .sum::<f64>()
+            / lf;
+        let alpha_mom = (mean_m * mean_m) / (var_m - mean_m).max(1e-6);
+        let f0 = (zero_cnt as f64) / lf;
+        let mut alpha_f0 = alpha_mom;
+        if f0 > 0.005 && f0 < 0.99 && f0 > (-mean_m * 0.98).exp() {
+            let mut lo = 0.10_f64;
+            let mut hi = 100.0_f64;
+            for _ in 0..40 {
+                let mid = 0.5 * (lo + hi);
+                if (1.0 + mean_m / mid).powf(-mid) > f0 {
+                    lo = mid;
+                } else {
+                    hi = mid;
+                }
+            }
+            alpha_f0 = 0.5 * (lo + hi);
+        }
+        let alpha = alpha_mom.min(alpha_f0).clamp(0.15, 100.0);
+        if alpha >= 50.0 {
+            0.0
+        } else {
+            1.0 / alpha
+        }
     }
 
     /// Partition `items` into metric clades/slices of size `<= max_cluster_size` using
@@ -1618,6 +1874,7 @@ impl BushwhackerEngine {
         site_weights: &[f64],
         word_weight_sums: &[f64],
         l_eff: f64,
+        inv_alpha: f64,
         max_cluster_size: usize,
         out_clusters: &mut Vec<Vec<usize>>,
     ) {
@@ -1641,6 +1898,7 @@ impl BushwhackerEngine {
                 site_weights,
                 word_weight_sums,
                 l_eff,
+                inv_alpha,
             );
             if d > max_d0 {
                 max_d0 = d;
@@ -1668,6 +1926,7 @@ impl BushwhackerEngine {
                         site_weights,
                         word_weight_sums,
                         l_eff,
+                        inv_alpha,
                     )
                 };
                 land_dists[k_idx][i] = d;
@@ -1856,6 +2115,7 @@ impl BushwhackerEngine {
                         site_weights,
                         word_weight_sums,
                         l_eff,
+                        inv_alpha,
                     );
                     let q = d - ri - mean_l_dist[j];
                     if q < best_q {
@@ -1933,6 +2193,7 @@ impl BushwhackerEngine {
                         site_weights,
                         word_weight_sums,
                         l_eff,
+                        inv_alpha,
                     );
                     if d < best_d {
                         best_d = d;
@@ -1968,6 +2229,7 @@ impl BushwhackerEngine {
         word_weight_sums: &[f64],
         _l: usize,
         l_eff: f64,
+        inv_alpha: f64,
         adj: &mut BTreeMap<usize, Vec<usize>>,
         node_labels: &mut BTreeMap<usize, String>,
         next_node: &mut usize,
@@ -2012,8 +2274,10 @@ impl BushwhackerEngine {
                     site_weights,
                     word_weight_sums,
                     l_eff,
+                    inv_alpha,
                 );
-                let v_val = d_val.max(0.5) * (1.0 + (d_val / l_eff.max(1.0)).powi(2));
+                let v_val = d_val.max(0.5)
+                    * (1.0 + (1.0 + inv_alpha) * (d_val / l_eff.max(1.0)).powi(2));
                 d_mat[i * cap + j] = d_val;
                 d_mat[j * cap + i] = d_val;
                 v_mat[i * cap + j] = v_val;
@@ -2166,6 +2430,7 @@ impl BushwhackerEngine {
         site_weights: &[f64],
         word_weight_sums: &[f64],
         l_eff: f64,
+        inv_alpha: f64,
         adj: &mut BTreeMap<usize, Vec<usize>>,
         node_labels: &mut BTreeMap<usize, String>,
         next_node: &mut usize,
@@ -2204,8 +2469,10 @@ impl BushwhackerEngine {
                     site_weights,
                     word_weight_sums,
                     l_eff,
+                    inv_alpha,
                 );
-                let v_val = d_val.max(0.5) * (1.0 + (d_val / l_eff.max(1.0)).powi(2));
+                let v_val = d_val.max(0.5)
+                    * (1.0 + (1.0 + inv_alpha) * (d_val / l_eff.max(1.0)).powi(2));
                 d_mat[i * cap + j] = d_val;
                 d_mat[j * cap + i] = d_val;
                 v_mat[i * cap + j] = v_val;
@@ -2229,26 +2496,45 @@ impl BushwhackerEngine {
         while active_c_count > target_roots && active_c_count >= 2 {
             let k = active.len();
             let k_m2 = ((k as f64) - 2.0).max(1.0);
+            let mut best_q = f64::INFINITY;
+            let mut best_pair = (0usize, 1usize);
             let mut best_cc_q = f64::INFINITY;
             let mut best_cc_pair = (0usize, 1usize);
 
             for a in 0..k {
                 let la = active[a];
-                if is_witness[la] {
-                    continue;
-                }
                 let ra = row_sums[la];
                 for b in (a + 1)..k {
                     let lb = active[b];
-                    if is_witness[lb] {
+                    if is_witness[la] && is_witness[lb] {
                         continue;
                     }
                     let q_val = k_m2 * d_mat[la * cap + lb] - ra - row_sums[lb];
-                    if q_val < best_cc_q {
+                    if q_val < best_q {
+                        best_q = q_val;
+                        best_pair = (a, b);
+                    }
+                    if !is_witness[la] && !is_witness[lb] && q_val < best_cc_q {
                         best_cc_q = q_val;
                         best_cc_pair = (a, b);
                     }
                 }
+            }
+
+            // If the global minimum-Q pair involves an external witness, graduate the
+            // cluster node directly to the next tournament level (and mark it as a witness
+            // in the local matrix) instead of forcing it into an artificial intra-cluster merge.
+            let (qa, qb) = best_pair;
+            if is_witness[active[qa]] != is_witness[active[qb]] {
+                let c_local = if !is_witness[active[qa]] {
+                    active[qa]
+                } else {
+                    active[qb]
+                };
+                graduated.push(local_to_global[c_local]);
+                is_witness[c_local] = true;
+                active_c_count -= 1;
+                continue;
             }
 
             let (a_pos, b_pos) = best_cc_pair;
@@ -2359,15 +2645,20 @@ impl BushwhackerEngine {
         let word_weight_sums = Self::compute_word_weight_sums(dist_weights);
 
         if n == 2 {
-            let d01 =
-                Self::compute_pair_unweighted_jc_dist_packed(&packed_vec[0], &packed_vec[1], l_eff);
+            let d01 = Self::compute_pair_unweighted_jc_dist_packed(
+                &packed_vec[0],
+                &packed_vec[1],
+                l_eff,
+                0.0,
+            );
             let ld = (d01 * 0.5).max(0.5);
             adj.get_mut(&0).unwrap().push(1);
             adj.get_mut(&1).unwrap().push(0);
             return (vec![ld, ld], adj, node_labels);
         }
-        if n <= 128 {
-            // Exact SIMD + parallel O(N^2) agglomeration path for N <= 128
+        let inv_alpha = Self::estimate_site_rate_inv_alpha(&packed_vec, bitmasks, n, l, l_eff);
+        if n <= 512 {
+            // Exact SIMD + parallel O(N^2) agglomeration path for N <= 512
             #[cfg(not(target_arch = "wasm32"))]
             let uw_rows: Vec<Vec<f64>> = (0..n)
                 .into_par_iter()
@@ -2380,6 +2671,7 @@ impl BushwhackerEngine {
                                 pi,
                                 &packed_vec[j],
                                 l_eff,
+                                inv_alpha,
                             );
                         }
                     }
@@ -2397,6 +2689,7 @@ impl BushwhackerEngine {
                                 pi,
                                 &packed_vec[j],
                                 l_eff,
+                                inv_alpha,
                             );
                         }
                     }
@@ -2490,6 +2783,7 @@ impl BushwhackerEngine {
                 &word_weight_sums,
                 l,
                 l_eff,
+                inv_alpha,
                 &mut adj,
                 &mut node_labels,
                 &mut next_node,
@@ -2520,6 +2814,7 @@ impl BushwhackerEngine {
             dist_weights,
             &word_weight_sums,
             l_eff,
+            inv_alpha,
             64,
             &mut leaf_clusters,
         );
@@ -2540,7 +2835,8 @@ impl BushwhackerEngine {
                 let sa = &seqs_map[&ref_set[a]];
                 for b in (a + 1)..m_ref {
                     let sb = &seqs_map[&ref_set[b]];
-                    let d = Self::compute_pair_unweighted_jc_dist_packed(sa, sb, l_eff);
+                    let d =
+                        Self::compute_pair_unweighted_jc_dist_packed(sa, sb, l_eff, inv_alpha);
                     dist_to_ref[a * m_ref + b] = d;
                     dist_to_ref[b * m_ref + a] = d;
                 }
@@ -2611,6 +2907,7 @@ impl BushwhackerEngine {
                     dist_weights,
                     &word_weight_sums,
                     l_eff,
+                    inv_alpha,
                     &mut adj,
                     &mut node_labels,
                     &mut next_node,
@@ -2628,6 +2925,7 @@ impl BushwhackerEngine {
                 dist_weights,
                 &word_weight_sums,
                 l_eff,
+                inv_alpha,
                 64,
                 &mut super_clusters,
             );
@@ -2641,6 +2939,7 @@ impl BushwhackerEngine {
             &word_weight_sums,
             l,
             l_eff,
+            inv_alpha,
             &mut adj,
             &mut node_labels,
             &mut next_node,
@@ -2990,11 +3289,21 @@ impl BushwhackerEngine {
                 }
             }
 
-            // 3. Subtree-Prune-and-Regraft (Fitch-Guided SPR in O(N log N * L / 64))
+            // 3. Subtree-Prune-and-Regraft (MDL-Certified Fitch-Guided SPR in O(N log N * L / 64))
             // Recovers leaves, clades, or inverted caterpillar segments across multiple hops
-            // via zero-cost component-separated BFS and JL sequence-neighbor candidate edges.
-            if round_idx <= 4 {
-                if self.refine_backbone_spr_step(adj, &mut states, n, l, site_weights) {
+            // via zero-cost component-separated BFS and JL sequence-neighbor candidate edges,
+            // leaving the final round for 1-hop MDL NNI local polishing.
+            if round_idx + 1 < max_rounds {
+                if self.refine_backbone_spr_step(
+                    adj,
+                    &mut states,
+                    n,
+                    l,
+                    l_eff,
+                    ti_cost,
+                    tv_cost,
+                    site_weights,
+                ) {
                     improved = true;
                 }
             }
@@ -3078,12 +3387,16 @@ impl BushwhackerEngine {
         cost
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn refine_backbone_spr_step(
         &self,
         adj: &mut BTreeMap<usize, Vec<usize>>,
         states: &mut HashMap<(usize, usize), (Vec<u8>, f64)>,
         n: usize,
         l: usize,
+        l_eff: f64,
+        ti_cost: f64,
+        tv_cost: f64,
         site_weights: &[f64],
     ) -> bool {
         // Every directed edge (s, u) where u >= n has degree 3 defines a valid SPR prune:
@@ -3307,15 +3620,99 @@ impl BushwhackerEngine {
                 site_weights,
             );
 
+            let eval_edge_mdl_delta =
+                |ex: usize,
+                 ey: usize,
+                 adj_map: &BTreeMap<usize, Vec<usize>>,
+                 st_map: &HashMap<(usize, usize), (Vec<u8>, f64)>|
+                 -> f64 {
+                    let (Some(t_ex), Some(t_ey)) = (st_map.get(&(ex, ey)), st_map.get(&(ey, ex)))
+                    else {
+                        return f64::NEG_INFINITY;
+                    };
+                    let x_ch: Vec<(Vec<u8>, f64)> = if ex >= n {
+                        adj_map[&ex]
+                            .iter()
+                            .copied()
+                            .filter(|&nb| nb != ey)
+                            .filter_map(|nb| st_map.get(&(nb, ex)).cloned())
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
+                    let y_ch: Vec<(Vec<u8>, f64)> = if ey >= n {
+                        adj_map[&ey]
+                            .iter()
+                            .copied()
+                            .filter(|&nb| nb != ex)
+                            .filter_map(|nb| st_map.get(&(nb, ey)).cloned())
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
+                    let g_base = if x_ch.len() >= 2 && y_ch.len() >= 2 {
+                        self.compute_split_mdl_gain_from_children(
+                            &x_ch,
+                            &y_ch,
+                            l,
+                            l_eff,
+                            ti_cost,
+                            tv_cost,
+                            site_weights,
+                        )
+                        .0
+                    } else {
+                        0.0
+                    };
+                    let g_ux = if x_ch.len() >= 2 {
+                        self.compute_split_mdl_gain_from_children(
+                            &[ts.clone(), t_ey.clone()],
+                            &x_ch,
+                            l,
+                            l_eff,
+                            ti_cost,
+                            tv_cost,
+                            site_weights,
+                        )
+                        .0
+                    } else {
+                        0.0
+                    };
+                    let g_uy = if y_ch.len() >= 2 {
+                        self.compute_split_mdl_gain_from_children(
+                            &[ts.clone(), t_ex.clone()],
+                            &y_ch,
+                            l,
+                            l_eff,
+                            ti_cost,
+                            tv_cost,
+                            site_weights,
+                        )
+                        .0
+                    } else {
+                        0.0
+                    };
+                    g_ux + g_uy - g_base
+                };
+
+            let old_mdl_delta = eval_edge_mdl_delta(a, b, adj, states);
             let mut best_edge = (a, b);
             let mut best_exact_cost = exact_old_cost - 1.0;
+            let mut best_mdl_delta = old_mdl_delta + 0.10;
             for (_, x, y) in top_cands {
                 if adj.get(&x).map(|v| v.contains(&y)).unwrap_or(false) {
                     if let (Some(tx), Some(ty)) = (states.get(&(x, y)), states.get(&(y, x))) {
                         let c_xy = Self::fitch_insert_cost_pair(&ts.0, &tx.0, &ty.0, site_weights);
-                        if c_xy < best_exact_cost {
-                            best_exact_cost = c_xy;
-                            best_edge = (x, y);
+                        if c_xy <= exact_old_cost - 1.0 {
+                            let cand_mdl_delta = eval_edge_mdl_delta(x, y, adj, states);
+                            if cand_mdl_delta > best_mdl_delta
+                                || ((cand_mdl_delta - best_mdl_delta).abs() <= 0.10
+                                    && c_xy < best_exact_cost)
+                            {
+                                best_mdl_delta = cand_mdl_delta;
+                                best_exact_cost = c_xy;
+                                best_edge = (x, y);
+                            }
                         }
                     }
                 }
@@ -4261,25 +4658,24 @@ impl BushwhackerEngine {
 
             let masked_u = v_clean && u_asym >= 1.5 && raw_delta >= 2.8;
             let masked_v = u_clean && v_asym >= 1.5 && raw_delta >= 2.8;
-            let both_asym = u_asym >= 1.8 && v_asym >= 1.8 && raw_delta >= 3.0;
 
-            if !(both_parsimony || masked_u || masked_v || both_asym) {
+            if !(both_parsimony || masked_u || masked_v) {
                 continue;
             }
 
             let same_purine = IS_PURINE[b_u_opt] == IS_PURINE[b_v_opt];
             let subst_s = (if same_purine { ti_cost } else { tv_cost }) * site_weights[s];
-            let delta_steps = if has_long {
+            let delta_steps = if has_long || clean_sites.len() >= 2 {
                 ((steps_star - steps_res) as f64).max(1.0)
             } else {
                 1.0
             };
 
             let mut jc_mult_hit = 0.0_f64;
-            if p_long_u > 0.05 && (masked_u || both_asym) {
+            if p_long_u > 0.05 && masked_u {
                 jc_mult_hit += 0.55 * p_long_u * (min_uw + subst_s);
             }
-            if p_long_v > 0.05 && (masked_v || both_asym) {
+            if p_long_v > 0.05 && masked_v {
                 jc_mult_hit += 0.55 * p_long_v * (min_vw + subst_s);
             }
 
