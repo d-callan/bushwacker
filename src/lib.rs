@@ -2985,10 +2985,364 @@ impl BushwhackerEngine {
                 }
             }
 
+            // 3. Subtree-Prune-and-Regraft (Fitch-Guided SPR in O(N log N * L / 64))
+            // Recovers leaves, clades, or inverted caterpillar segments across multiple hops
+            // via zero-cost component-separated BFS and JL sequence-neighbor candidate edges.
+            if round_idx <= 4 {
+                if self.refine_backbone_spr_step(adj, &mut states, n, l, site_weights) {
+                    improved = true;
+                }
+            }
+
             if !improved {
                 break;
             }
         }
+    }
+
+    #[inline]
+    fn fitch_insert_cost_pair(
+        s_mask: &[u8],
+        x_mask: &[u8],
+        y_mask: &[u8],
+        site_weights: &[f64],
+    ) -> f64 {
+        let l = s_mask.len();
+        let chunks = l / 8;
+        let mut cost = 0.0_f64;
+        for c in 0..chunks {
+            let off = c * 8;
+            let ws = u64::from_ne_bytes(s_mask[off..off + 8].try_into().unwrap());
+            let wx = u64::from_ne_bytes(x_mask[off..off + 8].try_into().unwrap());
+            let wy = u64::from_ne_bytes(y_mask[off..off + 8].try_into().unwrap());
+            let xy_and = wx & wy;
+            let xy_zero_hi =
+                !(xy_and.wrapping_add(0x7F7F_7F7F_7F7F_7F7F)) & 0x8080_8080_8080_8080;
+            let u_xy = if xy_zero_hi == 0 {
+                xy_and
+            } else {
+                let mut m = xy_zero_hi >> 7;
+                m |= m << 1;
+                m |= m << 2;
+                m |= m << 4;
+                (xy_and & !m) | ((wx | wy) & m)
+            };
+            let inter = ws & u_xy;
+            let zero_hi = !(inter.wrapping_add(0x7F7F_7F7F_7F7F_7F7F)) & 0x8080_8080_8080_8080;
+            if zero_hi != 0 {
+                for i in off..(off + 8) {
+                    let b1 = s_mask[i];
+                    if b1 != 15 {
+                        let bx = x_mask[i];
+                        let by = y_mask[i];
+                        let b2 = if bx == 15 {
+                            by
+                        } else if by == 15 {
+                            bx
+                        } else if (bx & by) != 0 {
+                            bx & by
+                        } else {
+                            bx | by
+                        };
+                        if b2 != 15 && (b1 & b2) == 0 {
+                            cost += site_weights[i];
+                        }
+                    }
+                }
+            }
+        }
+        for i in (chunks * 8)..l {
+            let b1 = s_mask[i];
+            if b1 != 15 {
+                let bx = x_mask[i];
+                let by = y_mask[i];
+                let b2 = if bx == 15 {
+                    by
+                } else if by == 15 {
+                    bx
+                } else if (bx & by) != 0 {
+                    bx & by
+                } else {
+                    bx | by
+                };
+                if b2 != 15 && (b1 & b2) == 0 {
+                    cost += site_weights[i];
+                }
+            }
+        }
+        cost
+    }
+
+    fn refine_backbone_spr_step(
+        &self,
+        adj: &mut BTreeMap<usize, Vec<usize>>,
+        states: &mut HashMap<(usize, usize), (Vec<u8>, f64)>,
+        n: usize,
+        l: usize,
+        site_weights: &[f64],
+    ) -> bool {
+        // Every directed edge (s, u) where u >= n has degree 3 defines a valid SPR prune:
+        // pruning u from between its other two neighbors (a, b) separates C_s from C_ab.
+        let mut movable: Vec<(usize, usize)> = Vec::new();
+        for (&u, nbs) in adj.iter() {
+            if u >= n && nbs.len() == 3 {
+                for &s in nbs {
+                    if s < n || adj.get(&s).map(|v| v.len()) == Some(3) {
+                        movable.push((s, u));
+                    }
+                }
+            }
+        }
+        let m = movable.len();
+        if m < 4 {
+            return false;
+        }
+
+        // Build O(M log M * L / 8) JL projection neighbor table over `states[&(s, u)].0`
+        let n_proj = 8usize;
+        let mut cand_peers: Vec<Vec<usize>> = vec![Vec::with_capacity(64); m];
+        for r in 0..n_proj {
+            let mut seed = 0x9E37_79B9_7F4A_7C15_u64
+                .wrapping_mul((r as u64) + 1)
+                .wrapping_add(0xBF58_476D_1CE4_E5B9_u64);
+            let mut masks = Vec::with_capacity(l);
+            for _ in 0..l {
+                seed = seed
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                let b_pick = ((seed >> 60) as u8) & 3;
+                let b_alt = ((seed >> 58) as u8) & 3;
+                masks.push((1u8 << b_pick) | (1u8 << b_alt));
+            }
+            let mut scored: Vec<(f64, usize)> = (0..m)
+                .map(|idx| {
+                    let (s, u) = movable[idx];
+                    if let Some((s_mask, _)) = states.get(&(s, u)) {
+                        let mut hits = 0i32;
+                        let mut val = 0i32;
+                        for (&b, &pm) in s_mask.iter().zip(&masks) {
+                            if b != 15 {
+                                val += 1;
+                                if (b & pm) != 0 {
+                                    hits += 1;
+                                }
+                            }
+                        }
+                        ((hits as f64) / (val.max(1) as f64), idx)
+                    } else {
+                        (0.0, idx)
+                    }
+                })
+                .collect();
+            scored.sort_by(|a, b| {
+                a.0.partial_cmp(&b.0)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| a.1.cmp(&b.1))
+            });
+            let win = 6usize;
+            for pos in 0..m {
+                let ia = scored[pos].1;
+                let end = (pos + 1 + win).min(m);
+                for &(_, ib) in &scored[(pos + 1)..end] {
+                    cand_peers[ia].push(ib);
+                    cand_peers[ib].push(ia);
+                }
+            }
+        }
+
+        let mut any_moved = false;
+        for idx in 0..m {
+            let (s, u) = movable[idx];
+            if adj.get(&u).map(|v| v.len()) != Some(3) || !adj[&u].contains(&s) {
+                continue;
+            }
+            let u_others: Vec<usize> = adj[&u].iter().copied().filter(|&x| x != s).collect();
+            if u_others.len() != 2 {
+                continue;
+            }
+            let (a, b) = (u_others[0], u_others[1]);
+            if adj[&a].contains(&b) {
+                continue;
+            }
+
+            let Some(ts) = states.get(&(s, u)).cloned() else {
+                continue;
+            };
+            let Some(ta) = states.get(&(a, u)).cloned() else {
+                continue;
+            };
+            let Some(tb) = states.get(&(b, u)).cloned() else {
+                continue;
+            };
+            let base_cost = Self::fitch_insert_cost_pair(&ts.0, &ta.0, &tb.0, site_weights);
+            if base_cost <= 1.0 {
+                continue;
+            }
+
+            // Optional O(1) bounded check if `s` is a small clade (<= 16 nodes) to allow
+            // long-range JL peer jumps beyond the BFS radius without cycle risk.
+            let mut sub_s: Vec<usize> = vec![s];
+            let mut q_idx = 0;
+            while q_idx < sub_s.len() && sub_s.len() <= 17 {
+                let curr = sub_s[q_idx];
+                q_idx += 1;
+                if let Some(cnbs) = adj.get(&curr) {
+                    for &nx in cnbs {
+                        if nx != u && !sub_s.contains(&nx) {
+                            sub_s.push(nx);
+                            if sub_s.len() > 17 {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            let s_is_small = sub_s.len() <= 16;
+
+            // Zero-Cost Component Separation BFS: starting from {a, b} with `u` and `s` blocked,
+            // every visited node is mathematically guaranteed to lie in C_ab (outside C_s)
+            // for any size of C_s in O(1) time (bounded by <= 72 visited nodes and <= 28 hops).
+            let mut cand_edges: Vec<(usize, usize)> = Vec::with_capacity(96);
+            let mut bfs_vis: HashSet<usize> = HashSet::with_capacity(96);
+            bfs_vis.insert(u);
+            bfs_vis.insert(s);
+            let mut bfs_q: VecDeque<(usize, u8)> = VecDeque::new();
+            bfs_vis.insert(a);
+            bfs_vis.insert(b);
+            bfs_q.push_back((a, 0));
+            bfs_q.push_back((b, 0));
+            while let Some((curr, d_hop)) = bfs_q.pop_front() {
+                if d_hop >= 28 || bfs_vis.len() >= 128 {
+                    continue;
+                }
+                if let Some(cnbs) = adj.get(&curr) {
+                    for &nx in cnbs {
+                        if nx != u && nx != s {
+                            let e = if curr < nx { (curr, nx) } else { (nx, curr) };
+                            cand_edges.push(e);
+                            if bfs_vis.len() < 128 && bfs_vis.insert(nx) {
+                                bfs_q.push_back((nx, d_hop + 1));
+                            }
+                        }
+                    }
+                }
+            }
+
+            if s_is_small {
+                let peers = &mut cand_peers[idx];
+                peers.sort_unstable();
+                peers.dedup();
+                for &p_idx in peers.iter() {
+                    let (ps, pu) = movable[p_idx];
+                    for center in [ps, pu] {
+                        if center != u && !sub_s.contains(&center) {
+                            if let Some(cnbs) = adj.get(&center) {
+                                for &nx in cnbs {
+                                    if nx != u && !sub_s.contains(&nx) {
+                                        let e = if center < nx {
+                                            (center, nx)
+                                        } else {
+                                            (nx, center)
+                                        };
+                                        cand_edges.push(e);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            cand_edges.sort_unstable();
+            cand_edges.dedup();
+
+            // Pre-screen candidate edges using zero-allocation bitwise Fitch cost
+            let best_pre_cost = base_cost - 1.0;
+            let mut top_cands: Vec<(f64, usize, usize)> = Vec::new();
+            for (x, y) in cand_edges {
+                if let (Some(tx), Some(ty)) = (states.get(&(x, y)), states.get(&(y, x))) {
+                    let c_xy = Self::fitch_insert_cost_pair(&ts.0, &tx.0, &ty.0, site_weights);
+                    if c_xy < best_pre_cost {
+                        top_cands.push((c_xy, x, y));
+                    }
+                }
+            }
+            if top_cands.is_empty() {
+                continue;
+            }
+            top_cands.sort_by(|x, y| {
+                x.0.partial_cmp(&y.0)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            top_cands.truncate(6);
+
+            // Temporarily prune `u` from between `a` and `b` so `T \ s` states are 100% exact
+            adj.get_mut(&a).unwrap().retain(|&z| z != u);
+            adj.get_mut(&b).unwrap().retain(|&z| z != u);
+            adj.get_mut(&a).unwrap().push(b);
+            adj.get_mut(&b).unwrap().push(a);
+            adj.get_mut(&u).unwrap().retain(|&z| z == s);
+
+            states.remove(&(a, u));
+            states.remove(&(u, a));
+            states.remove(&(b, u));
+            states.remove(&(u, b));
+            states.insert((a, b), ta);
+            states.insert((b, a), tb);
+            Self::propagate_directed_fitch_outward(
+                adj,
+                states,
+                VecDeque::from([(a, b, 0), (b, a, 0)]),
+                n,
+            );
+
+            let exact_old_cost = Self::fitch_insert_cost_pair(
+                &ts.0,
+                &states[&(a, b)].0,
+                &states[&(b, a)].0,
+                site_weights,
+            );
+
+            let mut best_edge = (a, b);
+            let mut best_exact_cost = exact_old_cost - 1.0;
+            for (_, x, y) in top_cands {
+                if adj.get(&x).map(|v| v.contains(&y)).unwrap_or(false) {
+                    if let (Some(tx), Some(ty)) = (states.get(&(x, y)), states.get(&(y, x))) {
+                        let c_xy = Self::fitch_insert_cost_pair(&ts.0, &tx.0, &ty.0, site_weights);
+                        if c_xy < best_exact_cost {
+                            best_exact_cost = c_xy;
+                            best_edge = (x, y);
+                        }
+                    }
+                }
+            }
+
+            let (rx, ry) = best_edge;
+            // Insert `u` onto `(rx, ry)` (either the improved target edge or restoring `(a, b)`)
+            let tx = states.remove(&(rx, ry)).unwrap();
+            let ty = states.remove(&(ry, rx)).unwrap();
+            adj.get_mut(&rx).unwrap().retain(|&z| z != ry);
+            adj.get_mut(&ry).unwrap().retain(|&z| z != rx);
+            adj.get_mut(&rx).unwrap().push(u);
+            adj.get_mut(&ry).unwrap().push(u);
+            adj.get_mut(&u).unwrap().extend([rx, ry]);
+
+            states.insert((rx, u), tx.clone());
+            states.insert((ry, u), ty.clone());
+            states.insert((u, rx), Self::combine_fitch_children(&[ts.clone(), ty.clone()]));
+            states.insert((u, ry), Self::combine_fitch_children(&[ts.clone(), tx.clone()]));
+            states.insert((u, s), Self::combine_fitch_children(&[tx, ty]));
+            Self::propagate_directed_fitch_outward(
+                adj,
+                states,
+                VecDeque::from([(u, rx, 0), (u, ry, 0), (u, s, 0)]),
+                n,
+            );
+
+            if best_edge != (a, b) {
+                any_moved = true;
+            }
+        }
+        any_moved
     }
 
     pub fn compute_all_directed_fitch_states(
