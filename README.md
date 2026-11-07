@@ -84,6 +84,7 @@ Options:
   --no-shunts                  Disable Stage 4 reticulate shunt peeling
   --min-shunt-sites <N>        Minimum parallel mutations to evaluate a shunt (default: 2)
   -h, --help                   Print help message
+  -V, --version                Print version information
 ```
 
 ### Example: Mammalian *Prestin* (`prestin.fasta`, 116 Mammals, 2,235 bp)
