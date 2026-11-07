@@ -8,7 +8,7 @@
 
 > *"Clear the statistical underbrush."*
 
-**BUSHWHACKER** is a first-principles **Minimum Description Length (MDL) / algorithmic Kolmogorov complexity** engine for phylogenetic graph induction, implemented natively in zero-dependency **Rust** ([`src/lib.rs`](src/lib.rs), [`src/main.rs`](src/main.rs)) with a reference **Python/NumPy** implementation ([`python/mdl_phylo.py`](python/mdl_phylo.py), [`python/bushwhacker.py`](python/bushwhacker.py)).
+**BUSHWHACKER** is a first-principles **Minimum Description Length (MDL) / algorithmic Kolmogorov complexity** engine for phylogenetic graph induction, implemented natively in **Rust** ([`src/lib.rs`](src/lib.rs), [`src/main.rs`](src/main.rs)).
 
 Instead of forcing every multiple sequence alignment onto a strictly bifurcating tree and evaluating it by in-sample point-estimate maximum likelihood `ln L(X | T, θ)`, **BUSHWHACKER** treats an alignment `X` (`N` taxa × `L` sites) as a discrete data table to be transmitted losslessly over a noiseless two-part Rissanen–Wallace sender–receiver channel:
 
@@ -187,13 +187,8 @@ bushwacker/
 │   ├── index.html                         # Interactive WebApp (Dieter Rams / Braun UI + Big-Tree Canvas)
 │   ├── pkg/                               # Compiled Rust WebAssembly bundle (wasm-pack)
 │   └── examples/                          # Empirical alignments (prestin.fasta, bglobin.fasta)
-├── python/
-│   ├── bushwhacker.py                     # Reference Python CLI
-│   └── mdl_phylo.py                       # Reference Python/NumPy MDL engine
 ├── benchmarks/
-│   ├── benchmark_first_principles.py      # 5-suite synthetic & empirical benchmark harness
 │   ├── benchmark_results.json             # Executed 5-suite benchmark outputs
-│   ├── stress_test_vs_paradigms.py        # 5-axis adversarial stress-test harness vs. ML/Bayesian/NJ/MP
 │   ├── stress_test_results.json           # Executed stress-test outputs
 │   └── generate_report_figures.py         # Publication vector PDF figure generator
 └── paper/
