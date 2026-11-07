@@ -51,6 +51,18 @@ BUSHWHACKER ships with a zero-server, 100% client-side **Rust + WebAssembly** we
 
 BUSHWHACKER is written in native Rust (`Edition 2021`) with 64-site bit-plane SIMD (`POPCNT` / `TZCNT` / 64-bit SWAR Fitch) and multi-threaded `rayon` parallelism (`0.015s` on 17-taxon β-globin; `0.123s` on 116-taxon mammalian *Prestin*; `0.923s` on 4,096 taxa).
 
+### Via `pip` (prebuilt wheels — no Rust toolchain needed)
+
+```bash
+pip install bushwhacker
+bushwhacker --help          # native binary installed on PATH
+python -m bushwhacker --help  # or via the Python shim
+```
+
+The wheel bundles the compiled Rust binary plus a thin `bushwhacker` Python package (`bushwhacker.binary_path()`, `bushwhacker.main()`); all inference runs in Rust.
+
+### From source (Rust)
+
 ```bash
 cargo build --release
 ```
