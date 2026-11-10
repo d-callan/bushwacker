@@ -2280,6 +2280,62 @@ impl BushwhackerEngine {
         let mut v_mat = vec![0.0_f64; cap * cap];
         let mut local_to_global: Vec<usize> = cluster_nodes.to_vec();
 
+        #[cfg(not(target_arch = "wasm32"))]
+        if m >= 64 {
+            let seq_refs: Vec<&PackedSeq64> = (0..m).map(|i| &seqs[&local_to_global[i]]).collect();
+            let rows: Vec<Vec<(f64, f64)>> = (0..m)
+                .into_par_iter()
+                .map(|i| {
+                    let si = seq_refs[i];
+                    let mut row = Vec::with_capacity(m - i - 1);
+                    for j in (i + 1)..m {
+                        let d_val = Self::compute_pair_jc_dist_packed(
+                            si,
+                            seq_refs[j],
+                            site_weights,
+                            word_weight_sums,
+                            l_eff,
+                            inv_alpha,
+                        );
+                        let v_val = d_val.max(0.5)
+                            * (1.0 + (1.0 + inv_alpha) * (d_val / l_eff.max(1.0)).powi(2));
+                        row.push((d_val, v_val));
+                    }
+                    row
+                })
+                .collect();
+            for (i, row) in rows.into_iter().enumerate() {
+                for (offset, (d_val, v_val)) in row.into_iter().enumerate() {
+                    let j = i + 1 + offset;
+                    d_mat[i * cap + j] = d_val;
+                    d_mat[j * cap + i] = d_val;
+                    v_mat[i * cap + j] = v_val;
+                    v_mat[j * cap + i] = v_val;
+                }
+            }
+        } else {
+            for i in 0..m {
+                let si = &seqs[&local_to_global[i]];
+                for j in (i + 1)..m {
+                    let sj = &seqs[&local_to_global[j]];
+                    let d_val = Self::compute_pair_jc_dist_packed(
+                        si,
+                        sj,
+                        site_weights,
+                        word_weight_sums,
+                        l_eff,
+                        inv_alpha,
+                    );
+                    let v_val = d_val.max(0.5)
+                        * (1.0 + (1.0 + inv_alpha) * (d_val / l_eff.max(1.0)).powi(2));
+                    d_mat[i * cap + j] = d_val;
+                    d_mat[j * cap + i] = d_val;
+                    v_mat[i * cap + j] = v_val;
+                    v_mat[j * cap + i] = v_val;
+                }
+            }
+        }
+        #[cfg(target_arch = "wasm32")]
         for i in 0..m {
             let si = &seqs[&local_to_global[i]];
             for j in (i + 1)..m {
@@ -2314,22 +2370,76 @@ impl BushwhackerEngine {
         let min_active = if stop_at_one { 2 } else { 3 };
         while active.len() > min_active {
             let k = active.len();
-            let mut best_q = f64::INFINITY;
-            let mut best_pair = (0usize, 1usize);
             let k_m2 = ((k as f64) - 2.0).max(1.0);
-
-            for a in 0..k {
-                let la = active[a];
-                let ra = row_sums[la];
-                for b in (a + 1)..k {
-                    let lb = active[b];
-                    let q_val = k_m2 * d_mat[la * cap + lb] - ra - row_sums[lb];
-                    if q_val < best_q {
-                        best_q = q_val;
-                        best_pair = (a, b);
+            #[cfg(not(target_arch = "wasm32"))]
+            let best_pair = if k >= 256 {
+                (0..(k - 1))
+                    .into_par_iter()
+                    .map(|a| {
+                        let la = active[a];
+                        let ra = row_sums[la];
+                        let row_d = &d_mat[la * cap..];
+                        let mut loc_q = f64::INFINITY;
+                        let mut loc_b = a + 1;
+                        for b in (a + 1)..k {
+                            let lb = active[b];
+                            let q_val = k_m2 * row_d[lb] - ra - row_sums[lb];
+                            if q_val < loc_q {
+                                loc_q = q_val;
+                                loc_b = b;
+                            }
+                        }
+                        (loc_q, a, loc_b)
+                    })
+                    .reduce(
+                        || (f64::INFINITY, 0usize, 1usize),
+                        |x, y| {
+                            if y.0 < x.0 || (y.0 == x.0 && (y.1, y.2) < (x.1, x.2)) {
+                                y
+                            } else {
+                                x
+                            }
+                        },
+                    )
+            } else {
+                let mut best_q = f64::INFINITY;
+                let mut bp = (0usize, 1usize);
+                for a in 0..k {
+                    let la = active[a];
+                    let ra = row_sums[la];
+                    let row_d = &d_mat[la * cap..];
+                    for b in (a + 1)..k {
+                        let lb = active[b];
+                        let q_val = k_m2 * row_d[lb] - ra - row_sums[lb];
+                        if q_val < best_q {
+                            best_q = q_val;
+                            bp = (a, b);
+                        }
                     }
                 }
-            }
+                (best_q, bp.0, bp.1)
+            };
+            #[cfg(not(target_arch = "wasm32"))]
+            let best_pair = (best_pair.1, best_pair.2);
+
+            #[cfg(target_arch = "wasm32")]
+            let best_pair = {
+                let mut best_q = f64::INFINITY;
+                let mut bp = (0usize, 1usize);
+                for a in 0..k {
+                    let la = active[a];
+                    let ra = row_sums[la];
+                    for b in (a + 1)..k {
+                        let lb = active[b];
+                        let q_val = k_m2 * d_mat[la * cap + lb] - ra - row_sums[lb];
+                        if q_val < best_q {
+                            best_q = q_val;
+                            bp = (a, b);
+                        }
+                    }
+                }
+                bp
+            };
 
             let (a_pos, b_pos) = best_pair;
             let lu = active[a_pos];
@@ -2805,6 +2915,7 @@ impl BushwhackerEngine {
                 &mut next_node,
                 false,
             );
+            let nni_rounds = if n <= 512 { 5 } else { 2 };
             self.refine_backbone_nni_mdl(
                 &mut adj,
                 bitmasks,
@@ -2815,7 +2926,7 @@ impl BushwhackerEngine {
                 ti_cost,
                 tv_cost,
                 tree_weights,
-                5,
+                nni_rounds,
             );
             return (loads, adj, node_labels);
         }
@@ -2896,6 +3007,7 @@ impl BushwhackerEngine {
         // Outgroup-Witnessed Partial Agglomeration tournament in O(N log N * L / 64)
         let mut next_node = n;
         let mut current_clusters = leaf_clusters;
+        let mut prev_root_count = n;
         let current_roots: Vec<usize> = loop {
             let n_cl = current_clusters.len();
             let mut next_roots = Vec::new();
@@ -2931,9 +3043,10 @@ impl BushwhackerEngine {
                 );
                 next_roots.extend(grad);
             }
-            if next_roots.len() <= 96 {
+            if next_roots.len() <= 160 || next_roots.len() * 5 >= prev_root_count * 4 {
                 break next_roots;
             }
+            prev_root_count = next_roots.len();
             let mut super_clusters: Vec<Vec<usize>> = Vec::new();
             Self::partition_items_recursive(
                 next_roots,
@@ -4295,6 +4408,14 @@ impl BushwhackerEngine {
 
         let mut bin_adj = adj_mdl.clone();
         let mut next_id = bin_adj.keys().copied().max().unwrap_or(n) + 1;
+        let mut states = self.compute_all_directed_fitch_states(
+            &bin_adj,
+            bitmasks,
+            n,
+            l,
+            terminal_loads,
+            l_eff,
+        );
 
         loop {
             let Some((&h, _)) = bin_adj.iter().find(|(&u, nbs)| u >= n && nbs.len() >= 4) else {
@@ -4336,86 +4457,168 @@ impl BushwhackerEngine {
                 }
             }
 
-            let chosen_u: Vec<usize> = if let Some(u_set) = matched_subset {
-                u_set
-            } else {
-                let states = self.compute_all_directed_fitch_states(
-                    &bin_adj,
-                    bitmasks,
-                    n,
-                    l,
-                    terminal_loads,
-                    l_eff,
-                );
-                let nb_states: Vec<(Vec<u8>, f64)> =
-                    nbs.iter().map(|&c| states[&(c, h)].clone()).collect();
-                if d == 4 {
-                    let pairings = [([0usize, 1], [2usize, 3]), ([0, 2], [1, 3]), ([0, 3], [1, 2])];
-                    let mut best_p = vec![0usize, 1];
-                    let mut best_g = f64::NEG_INFINITY;
-                    for (p1, p2) in pairings {
-                        let (g, _, _) = self.compute_split_mdl_gain_from_children(
-                            &[nb_states[p1[0]].clone(), nb_states[p1[1]].clone()],
-                            &[nb_states[p2[0]].clone(), nb_states[p2[1]].clone()],
-                            l,
-                            l_eff,
-                            ti_cost,
-                            tv_cost,
-                            site_weights,
-                        );
-                        if g > best_g {
-                            best_g = g;
-                            best_p = vec![p1[0], p1[1]];
-                        }
+            if let Some(chosen_u) = matched_subset {
+                let new_node = next_id;
+                next_id += 1;
+                bin_adj.insert(new_node, vec![h]);
+                bin_adj.get_mut(&h).unwrap().push(new_node);
+                let mut u_ch_states = Vec::with_capacity(chosen_u.len());
+                for &r in &chosen_u {
+                    let c_node = nbs[r];
+                    if let Some(st) = states.remove(&(c_node, h)) {
+                        u_ch_states.push(st.clone());
+                        states.insert((c_node, new_node), st);
                     }
-                    best_p
-                } else {
-                    let mut d_mat = vec![0.0_f64; d * d];
-                    let mut row_sums = vec![0.0_f64; d];
-                    for a in 0..d {
-                        for b in (a + 1)..d {
-                            let s1 = &nb_states[a].0;
-                            let s2 = &nb_states[b].0;
-                            let mut w_diff = 0.0_f64;
-                            for s in 0..l {
-                                let b1 = s1[s];
-                                let b2 = s2[s];
-                                if b1 != 15 && b2 != 15 && (b1 & b2) == 0 {
-                                    w_diff += site_weights[s];
-                                }
+                    bin_adj.get_mut(&h).unwrap().retain(|&x| x != c_node);
+                    bin_adj.get_mut(&c_node).unwrap().retain(|&x| x != h);
+                    bin_adj.get_mut(&new_node).unwrap().push(c_node);
+                    bin_adj.get_mut(&c_node).unwrap().push(new_node);
+                }
+                if !u_ch_states.is_empty() {
+                    states.insert((new_node, h), Self::combine_fitch_children(&u_ch_states));
+                }
+                continue;
+            }
+
+            let mut nb_nodes: Vec<usize> = nbs;
+            let mut nb_states: Vec<(Vec<u8>, f64)> = nb_nodes
+                .iter()
+                .map(|&c| {
+                    states
+                        .get(&(c, h))
+                        .cloned()
+                        .unwrap_or_else(|| (vec![15_u8; l], 1.0))
+                })
+                .collect();
+
+            if d > 4 {
+                let cap = 2 * d + 2;
+                let mut d_mat = vec![0.0_f64; cap * cap];
+                let mut row_sums = vec![0.0_f64; cap];
+                for a in 0..d {
+                    let s1 = &nb_states[a].0;
+                    for b in (a + 1)..d {
+                        let s2 = &nb_states[b].0;
+                        let mut w_diff = 0.0_f64;
+                        for s in 0..l {
+                            let b1 = s1[s];
+                            let b2 = s2[s];
+                            if b1 != 15 && b2 != 15 && (b1 & b2) == 0 {
+                                w_diff += site_weights[s];
                             }
-                            d_mat[a * d + b] = w_diff;
-                            d_mat[b * d + a] = w_diff;
-                            row_sums[a] += w_diff;
-                            row_sums[b] += w_diff;
                         }
+                        d_mat[a * cap + b] = w_diff;
+                        d_mat[b * cap + a] = w_diff;
+                        row_sums[a] += w_diff;
+                        row_sums[b] += w_diff;
                     }
-                    let d_m2 = (d as f64) - 2.0;
+                }
+                let mut active: Vec<usize> = (0..d).collect();
+                while active.len() > 4 {
+                    let k = active.len();
+                    let k_m2 = (k as f64) - 2.0;
                     let mut best_q = f64::INFINITY;
                     let mut best_pair = (0usize, 1usize);
-                    for a in 0..d {
-                        for b in (a + 1)..d {
-                            let q = d_m2 * d_mat[a * d + b] - row_sums[a] - row_sums[b];
+                    for a in 0..k {
+                        let la = active[a];
+                        let ra = row_sums[la];
+                        for b in (a + 1)..k {
+                            let lb = active[b];
+                            let q = k_m2 * d_mat[la * cap + lb] - ra - row_sums[lb];
                             if q < best_q {
                                 best_q = q;
                                 best_pair = (a, b);
                             }
                         }
                     }
-                    vec![best_pair.0, best_pair.1]
-                }
-            };
+                    let lu = active[best_pair.0];
+                    let lv = active[best_pair.1];
+                    let gu = nb_nodes[lu];
+                    let gv = nb_nodes[lv];
+                    let new_node = next_id;
+                    next_id += 1;
+                    let lw = nb_nodes.len();
+                    nb_nodes.push(new_node);
+                    let st_w = Self::combine_fitch_children(&[
+                        nb_states[lu].clone(),
+                        nb_states[lv].clone(),
+                    ]);
+                    states.insert((new_node, h), st_w.clone());
+                    nb_states.push(st_w);
 
-            let new_node = next_id;
-            next_id += 1;
-            bin_adj.insert(new_node, vec![h]);
-            bin_adj.get_mut(&h).unwrap().push(new_node);
-            for r in chosen_u {
-                let c_node = nbs[r];
-                bin_adj.get_mut(&h).unwrap().retain(|&x| x != c_node);
-                bin_adj.get_mut(&c_node).unwrap().retain(|&x| x != h);
-                bin_adj.get_mut(&new_node).unwrap().push(c_node);
-                bin_adj.get_mut(&c_node).unwrap().push(new_node);
+                    bin_adj.insert(new_node, vec![h, gu, gv]);
+                    bin_adj.get_mut(&h).unwrap().retain(|&x| x != gu && x != gv);
+                    bin_adj.get_mut(&h).unwrap().push(new_node);
+                    bin_adj.get_mut(&gu).unwrap().retain(|&x| x != h);
+                    bin_adj.get_mut(&gu).unwrap().push(new_node);
+                    bin_adj.get_mut(&gv).unwrap().retain(|&x| x != h);
+                    bin_adj.get_mut(&gv).unwrap().push(new_node);
+
+                    let d_uv = d_mat[lu * cap + lv];
+                    let limb_u =
+                        (0.5 * d_uv + (row_sums[lu] - row_sums[lv]) / (2.0 * k_m2)).max(0.0);
+                    let limb_v = (d_uv - limb_u).max(0.0);
+                    active.retain(|&x| x != lu && x != lv);
+                    let mut rw = 0.0_f64;
+                    for &lx in &active {
+                        let d_ux = d_mat[lu * cap + lx];
+                        let d_vx = d_mat[lv * cap + lx];
+                        let d_wx = (0.5 * (d_ux - limb_u + d_vx - limb_v)).max(0.0);
+                        d_mat[lw * cap + lx] = d_wx;
+                        d_mat[lx * cap + lw] = d_wx;
+                        row_sums[lx] += d_wx - d_ux - d_vx;
+                        rw += d_wx;
+                    }
+                    row_sums[lw] = rw;
+                    active.push(lw);
+                }
+            }
+
+            let nbs4 = bin_adj[&h].clone();
+            if nbs4.len() == 4 {
+                let nb4_states: Vec<(Vec<u8>, f64)> = nbs4
+                    .iter()
+                    .map(|&c| {
+                        states
+                            .get(&(c, h))
+                            .cloned()
+                            .unwrap_or_else(|| (vec![15_u8; l], 1.0))
+                    })
+                    .collect();
+                let pairings = [([0usize, 1], [2usize, 3]), ([0, 2], [1, 3]), ([0, 3], [1, 2])];
+                let mut best_p = [0usize, 1];
+                let mut best_g = f64::NEG_INFINITY;
+                for (p1, p2) in pairings {
+                    let (g, _, _) = self.compute_split_mdl_gain_from_children(
+                        &[nb4_states[p1[0]].clone(), nb4_states[p1[1]].clone()],
+                        &[nb4_states[p2[0]].clone(), nb4_states[p2[1]].clone()],
+                        l,
+                        l_eff,
+                        ti_cost,
+                        tv_cost,
+                        site_weights,
+                    );
+                    if g > best_g {
+                        best_g = g;
+                        best_p = p1;
+                    }
+                }
+                let new_node = next_id;
+                next_id += 1;
+                let c0 = nbs4[best_p[0]];
+                let c1 = nbs4[best_p[1]];
+                let st_w = Self::combine_fitch_children(&[
+                    nb4_states[best_p[0]].clone(),
+                    nb4_states[best_p[1]].clone(),
+                ]);
+                states.insert((new_node, h), st_w);
+                bin_adj.insert(new_node, vec![h, c0, c1]);
+                bin_adj.get_mut(&h).unwrap().retain(|&x| x != c0 && x != c1);
+                bin_adj.get_mut(&h).unwrap().push(new_node);
+                bin_adj.get_mut(&c0).unwrap().retain(|&x| x != h);
+                bin_adj.get_mut(&c0).unwrap().push(new_node);
+                bin_adj.get_mut(&c1).unwrap().retain(|&x| x != h);
+                bin_adj.get_mut(&c1).unwrap().push(new_node);
             }
         }
         bin_adj
@@ -6102,6 +6305,1326 @@ impl BushwhackerEngine {
 }
 
 // ---------------------------------------------------------------------------
+// Lossless Phylogenetic Alignment Codec (.bwz) via Causal Arithmetic Coding
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct BwzCompressionStats {
+    pub n_taxa: usize,
+    pub n_sites: usize,
+    pub raw_seq_bytes: usize,
+    pub compressed_seq_bytes: usize,
+    pub compressed_header_bytes: usize,
+    pub total_bwz_bytes: usize,
+    pub seq_mdl_nats: f64,
+    pub total_bwz_nats: f64,
+}
+
+struct ArithEncoder {
+    low: u64,
+    high: u64,
+    pending: usize,
+    bits: Vec<u8>,
+}
+
+impl ArithEncoder {
+    fn new() -> Self {
+        Self {
+            low: 0,
+            high: 0xFFFF_FFFF,
+            pending: 0,
+            bits: Vec::with_capacity(65536),
+        }
+    }
+
+    #[inline]
+    fn put_bit(&mut self, b: u8) {
+        self.bits.push(b);
+        while self.pending > 0 {
+            self.bits.push(1 - b);
+            self.pending -= 1;
+        }
+    }
+
+    #[inline]
+    fn encode_bit(&mut self, bit: u8, p1: u32) {
+        let p1_clamped = p1.clamp(1, 65535) as u64;
+        let span = self.high - self.low + 1;
+        let mid = self.low + ((span * (65536 - p1_clamped)) >> 16) - 1;
+        if bit == 0 {
+            self.high = mid;
+        } else {
+            self.low = mid + 1;
+        }
+        loop {
+            if self.high < 0x8000_0000 {
+                self.put_bit(0);
+            } else if self.low >= 0x8000_0000 {
+                self.put_bit(1);
+                self.low -= 0x8000_0000;
+                self.high -= 0x8000_0000;
+            } else if self.low >= 0x4000_0000 && self.high < 0xC000_0000 {
+                self.pending += 1;
+                self.low -= 0x4000_0000;
+                self.high -= 0x4000_0000;
+            } else {
+                break;
+            }
+            self.low = (self.low << 1) & 0xFFFF_FFFF;
+            self.high = ((self.high << 1) | 1) & 0xFFFF_FFFF;
+        }
+    }
+
+    fn encode_int_elias(&mut self, m: usize, p_zero: u32) {
+        if m == 0 {
+            self.encode_bit(0, 65536 - p_zero.clamp(1, 65535));
+            return;
+        }
+        self.encode_bit(1, 65536 - p_zero.clamp(1, 65535));
+        let mut blocks: Vec<(usize, usize)> = Vec::new();
+        let mut v = m;
+        while v > 1 {
+            let bit_len = (usize::BITS - v.leading_zeros()) as usize;
+            blocks.push((v, bit_len));
+            v = bit_len - 1;
+        }
+        for &(val, bit_len) in blocks.iter().rev() {
+            self.encode_bit(1, 32768);
+            for shift in (0..(bit_len - 1)).rev() {
+                let b = ((val >> shift) & 1) as u8;
+                self.encode_bit(b, 32768);
+            }
+        }
+        self.encode_bit(0, 32768);
+    }
+
+    fn encode_categorical(&mut self, sym_idx: usize, weights: &[u32]) {
+        let mut rem: u64 = weights.iter().map(|&w| w as u64).sum();
+        for (i, &w) in weights.iter().enumerate().take(weights.len().saturating_sub(1)) {
+            if rem == 0 {
+                break;
+            }
+            let w64 = w as u64;
+            if w64 == 0 {
+                continue;
+            }
+            if w64 >= rem {
+                break;
+            }
+            let p_other = (((65536.0 * ((rem - w64) as f64)) / (rem as f64)).round() as u32)
+                .clamp(1, 65535);
+            if sym_idx == i {
+                self.encode_bit(0, p_other);
+                return;
+            } else {
+                self.encode_bit(1, p_other);
+                rem -= w64;
+            }
+        }
+    }
+
+    fn finish(mut self) -> Vec<u8> {
+        self.pending += 1;
+        if self.low < 0x4000_0000 {
+            self.put_bit(0);
+        } else {
+            self.put_bit(1);
+        }
+        let mut out = vec![0_u8; (self.bits.len() + 7) / 8];
+        for (i, &b) in self.bits.iter().enumerate() {
+            if b != 0 {
+                out[i >> 3] |= 1_u8 << (7 - (i & 7));
+            }
+        }
+        out
+    }
+}
+
+struct ArithDecoder<'a> {
+    data: &'a [u8],
+    bit_pos: usize,
+    low: u64,
+    high: u64,
+    val: u64,
+}
+
+impl<'a> ArithDecoder<'a> {
+    fn new(data: &'a [u8]) -> Self {
+        let mut dec = Self {
+            data,
+            bit_pos: 0,
+            low: 0,
+            high: 0xFFFF_FFFF,
+            val: 0,
+        };
+        for _ in 0..32 {
+            dec.val = (dec.val << 1) | (dec.get_bit() as u64);
+        }
+        dec
+    }
+
+    #[inline]
+    fn get_bit(&mut self) -> u8 {
+        let byte_idx = self.bit_pos >> 3;
+        if byte_idx >= self.data.len() {
+            return 0;
+        }
+        let b = (self.data[byte_idx] >> (7 - (self.bit_pos & 7))) & 1;
+        self.bit_pos += 1;
+        b
+    }
+
+    #[inline]
+    fn decode_bit(&mut self, p1: u32) -> u8 {
+        let p1_clamped = p1.clamp(1, 65535) as u64;
+        let span = self.high - self.low + 1;
+        let mid = self.low + ((span * (65536 - p1_clamped)) >> 16) - 1;
+        let bit = if self.val <= mid {
+            self.high = mid;
+            0
+        } else {
+            self.low = mid + 1;
+            1
+        };
+        loop {
+            if self.high < 0x8000_0000 {
+                // E1 scaling
+            } else if self.low >= 0x8000_0000 {
+                self.val -= 0x8000_0000;
+                self.low -= 0x8000_0000;
+                self.high -= 0x8000_0000;
+            } else if self.low >= 0x4000_0000 && self.high < 0xC000_0000 {
+                self.val -= 0x4000_0000;
+                self.low -= 0x4000_0000;
+                self.high -= 0x4000_0000;
+            } else {
+                break;
+            }
+            self.low = (self.low << 1) & 0xFFFF_FFFF;
+            self.high = ((self.high << 1) | 1) & 0xFFFF_FFFF;
+            self.val = ((self.val << 1) | (self.get_bit() as u64)) & 0xFFFF_FFFF;
+        }
+        bit
+    }
+
+    fn decode_int_elias(&mut self, p_zero: u32) -> usize {
+        if self.decode_bit(65536 - p_zero.clamp(1, 65535)) == 0 {
+            return 0;
+        }
+        let mut n = 1usize;
+        let mut steps = 0usize;
+        while steps < 16 && self.decode_bit(32768) == 1 {
+            steps += 1;
+            let len = n.min(60);
+            let mut v = 1usize;
+            for _ in 0..len {
+                v = (v << 1) | (self.decode_bit(32768) as usize);
+            }
+            n = v;
+        }
+        n
+    }
+
+    fn decode_categorical(&mut self, weights: &[u32]) -> usize {
+        let mut rem: u64 = weights.iter().map(|&w| w as u64).sum();
+        let mut last_valid = 0usize;
+        for (i, &w) in weights.iter().enumerate() {
+            if w > 0 {
+                last_valid = i;
+            }
+        }
+        for (i, &w) in weights.iter().enumerate().take(weights.len().saturating_sub(1)) {
+            if rem == 0 {
+                break;
+            }
+            let w64 = w as u64;
+            if w64 == 0 {
+                continue;
+            }
+            if w64 >= rem {
+                return i;
+            }
+            let p_other = (((65536.0 * ((rem - w64) as f64)) / (rem as f64)).round() as u32)
+                .clamp(1, 65535);
+            if self.decode_bit(p_other) == 0 {
+                return i;
+            }
+            rem -= w64;
+        }
+        last_valid
+    }
+}
+
+fn arith_compress_bytes_order0(input: &[u8]) -> Vec<u8> {
+    let mut enc = ArithEncoder::new();
+    let mut match_p1 = 16384_u32;
+    let mut ctx_counts = vec![[1_u32; 256]; 256];
+    let mut prev = 0_usize;
+    let mut pos = 0_usize;
+    while pos < input.len() {
+        let win_start = pos.saturating_sub(32767);
+        let max_len = (input.len() - pos).min(512);
+        let mut best_len = 0_usize;
+        let mut best_dist = 1_usize;
+        if max_len >= 4 && pos > win_start {
+            for cand in (win_start..pos).rev() {
+                if input[cand] == input[pos] && input[cand + 1] == input[pos + 1] {
+                    let mut l = 2_usize;
+                    while l < max_len && input[cand + l] == input[pos + l] {
+                        l += 1;
+                    }
+                    if l > best_len {
+                        best_len = l;
+                        best_dist = pos - cand;
+                        if best_len == max_len {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        if best_len >= 4 {
+            enc.encode_bit(1, match_p1);
+            match_p1 = ((match_p1 * 31 + 65535) >> 5).clamp(1, 65535);
+            enc.encode_int_elias(best_len - 4, 32768);
+            enc.encode_int_elias(best_dist - 1, 32768);
+            prev = input[pos + best_len - 1] as usize;
+            pos += best_len;
+        } else {
+            enc.encode_bit(0, match_p1);
+            match_p1 = ((match_p1 * 31) >> 5).clamp(1, 65535);
+            let b = input[pos] as usize;
+            enc.encode_categorical(b, &ctx_counts[prev]);
+            ctx_counts[prev][b] += 4;
+            prev = b;
+            pos += 1;
+        }
+    }
+    enc.finish()
+}
+
+fn arith_decompress_bytes_order0(compressed: &[u8], out_len: usize) -> Vec<u8> {
+    let mut dec = ArithDecoder::new(compressed);
+    let mut match_p1 = 16384_u32;
+    let mut ctx_counts = vec![[1_u32; 256]; 256];
+    let mut prev = 0_usize;
+    let mut out = Vec::with_capacity(out_len);
+    while out.len() < out_len {
+        let is_match = dec.decode_bit(match_p1) != 0;
+        if is_match {
+            match_p1 = ((match_p1 * 31 + 65535) >> 5).clamp(1, 65535);
+            let len = dec.decode_int_elias(32768) + 4;
+            let dist = dec.decode_int_elias(32768) + 1;
+            let start = out.len().saturating_sub(dist);
+            for i in 0..len {
+                if out.len() >= out_len {
+                    break;
+                }
+                let b = out[start + i];
+                out.push(b);
+                prev = b as usize;
+            }
+        } else {
+            match_p1 = ((match_p1 * 31) >> 5).clamp(1, 65535);
+            let sym = dec.decode_categorical(&ctx_counts[prev]);
+            out.push(sym as u8);
+            ctx_counts[prev][sym] += 4;
+            prev = sym;
+        }
+    }
+    out
+}
+
+/// Compress an alignment (`names`, `seqs`) and its induced `BushwhackerResult`
+/// into a self-contained, bit-for-bit lossless `.bwz` phylogenetic archive.
+pub fn compress_alignment_to_bwz(
+    names: &[String],
+    seqs: &[String],
+    res: &BushwhackerResult,
+) -> Result<(Vec<u8>, BwzCompressionStats), String> {
+    let n = names.len();
+    if n == 0 || seqs.len() != n {
+        return Err("Invalid alignment dimensions for .bwz compression".to_string());
+    }
+    let l = seqs[0].len();
+    let leaf_seqs: Vec<&[u8]> = seqs.iter().map(|s| s.as_bytes()).collect();
+
+    // 1. Build preorder tree traversal from `res.adjacency`
+    let adj = &res.adjacency;
+    let root = adj
+        .iter()
+        .filter(|(&u, nbs)| u >= n && !nbs.is_empty())
+        .max_by_key(|(_, nbs)| nbs.len())
+        .map(|(&u, _)| u)
+        .unwrap_or(0);
+
+    let mut parent_map: HashMap<usize, Option<usize>> = HashMap::new();
+    parent_map.insert(root, None);
+    let mut order: Vec<usize> = vec![root];
+    let mut q: VecDeque<usize> = VecDeque::from([root]);
+    while let Some(u) = q.pop_front() {
+        if let Some(nbs) = adj.get(&u) {
+            for &v in nbs {
+                if !parent_map.contains_key(&v) {
+                    parent_map.insert(v, Some(u));
+                    order.push(v);
+                    q.push_back(v);
+                }
+            }
+        }
+    }
+    // Include any disconnected leaves if present
+    for leaf_i in 0..n {
+        if !parent_map.contains_key(&leaf_i) {
+            parent_map.insert(leaf_i, Some(root));
+            order.push(leaf_i);
+        }
+    }
+
+    let n_nodes = order.len();
+    let mut node_to_pidx: HashMap<usize, usize> = HashMap::with_capacity(n_nodes);
+    for (pidx, &u) in order.iter().enumerate() {
+        node_to_pidx.insert(u, pidx);
+    }
+
+    let mut children_pidx: Vec<Vec<usize>> = vec![Vec::new(); n_nodes];
+    let mut parent_pidx: Vec<usize> = vec![0; n_nodes];
+    for (pidx, &u) in order.iter().enumerate().skip(1) {
+        let p_node = parent_map[&u].unwrap_or(root);
+        let p_i = node_to_pidx[&p_node];
+        parent_pidx[pidx] = p_i;
+        children_pidx[p_i].push(pidx);
+    }
+
+    // 2. Two-pass Fitch parsimony reconstruction over full ASCII byte alphabet
+    let mut alphabet_set: BTreeSet<u8> = BTreeSet::new();
+    for &ls in &leaf_seqs {
+        for &b in ls {
+            alphabet_set.insert(b);
+        }
+    }
+    let alphabet: Vec<u8> = alphabet_set.into_iter().collect();
+    let k_alpha = alphabet.len();
+    let mut alpha_idx = [0_usize; 256];
+    for (i, &b) in alphabet.iter().enumerate() {
+        alpha_idx[b as usize] = i;
+    }
+
+    let mut node_seqs: Vec<Vec<u8>> = vec![vec![0_u8; l]; n_nodes];
+    let mut gap_mask: Vec<Vec<bool>> = vec![vec![false; l]; n_nodes];
+    let mut n_mask: Vec<Vec<bool>> = vec![vec![false; l]; n_nodes];
+    for (pidx, &u) in order.iter().enumerate() {
+        if u < n {
+            node_seqs[pidx].copy_from_slice(leaf_seqs[u]);
+            for s in 0..l {
+                gap_mask[pidx][s] = leaf_seqs[u][s] == b'-';
+                n_mask[pidx][s] = leaf_seqs[u][s] == b'N';
+            }
+        }
+    }
+
+    let gap_sym_opt = alphabet.iter().position(|&x| x == b'-');
+    let n_sym_opt = alphabet.iter().position(|&x| x == b'N');
+    let first_nongap_idx = (0..k_alpha)
+        .find(|&i| Some(i) != gap_sym_opt && Some(i) != n_sym_opt)
+        .unwrap_or(0);
+    let mut all_nongap_mask = 0_u64;
+    for i in 0..k_alpha.min(64) {
+        if Some(i) != gap_sym_opt && Some(i) != n_sym_opt {
+            all_nongap_mask |= 1_u64 << i;
+        }
+    }
+    if all_nongap_mask == 0 {
+        all_nongap_mask = 1;
+    }
+
+    let mut f_masks: Vec<u64> = vec![0_u64; n_nodes];
+    let mut g_masks: Vec<u8> = vec![0_u8; n_nodes];
+    let mut nm_masks: Vec<u8> = vec![0_u8; n_nodes];
+    for s in 0..l {
+        for pidx in (0..n_nodes).rev() {
+            let u = order[pidx];
+            if u < n {
+                let b = leaf_seqs[u][s];
+                if b == b'-' {
+                    g_masks[pidx] = 2;
+                    nm_masks[pidx] = 1;
+                    f_masks[pidx] = all_nongap_mask;
+                } else if b == b'N' {
+                    g_masks[pidx] = 1;
+                    nm_masks[pidx] = 2;
+                    f_masks[pidx] = all_nongap_mask;
+                } else {
+                    g_masks[pidx] = 1;
+                    nm_masks[pidx] = 1;
+                    let sym_i = alpha_idx[b as usize];
+                    f_masks[pidx] = 1_u64 << sym_i;
+                }
+            } else {
+                let ch = &children_pidx[pidx];
+                if ch.is_empty() {
+                    g_masks[pidx] = 1;
+                    nm_masks[pidx] = 1;
+                    f_masks[pidx] = 1_u64 << first_nongap_idx;
+                } else {
+                    let mut g_cnt = [0_u16; 2];
+                    let mut nm_cnt = [0_u16; 2];
+                    let mut counts = [0_u16; 64];
+                    let mut max_c = 0_u16;
+                    for &c_i in ch {
+                        let gm = g_masks[c_i];
+                        if (gm & 1) != 0 {
+                            g_cnt[0] += 1;
+                        }
+                        if (gm & 2) != 0 {
+                            g_cnt[1] += 1;
+                        }
+                        let nmm = nm_masks[c_i];
+                        if (nmm & 1) != 0 {
+                            nm_cnt[0] += 1;
+                        }
+                        if (nmm & 2) != 0 {
+                            nm_cnt[1] += 1;
+                        }
+                        let m = f_masks[c_i];
+                        let mut bits = m;
+                        while bits != 0 {
+                            let b_idx = bits.trailing_zeros() as usize;
+                            counts[b_idx] += 1;
+                            if counts[b_idx] > max_c {
+                                max_c = counts[b_idx];
+                            }
+                            bits &= bits - 1;
+                        }
+                    }
+                    g_masks[pidx] = if g_cnt[0] > g_cnt[1] {
+                        1
+                    } else if g_cnt[1] > g_cnt[0] {
+                        2
+                    } else {
+                        3
+                    };
+                    nm_masks[pidx] = if nm_cnt[0] > nm_cnt[1] {
+                        1
+                    } else if nm_cnt[1] > nm_cnt[0] {
+                        2
+                    } else {
+                        3
+                    };
+                    let mut win_mask = 0_u64;
+                    for b_idx in 0..k_alpha.min(64) {
+                        if counts[b_idx] == max_c {
+                            win_mask |= 1_u64 << b_idx;
+                        }
+                    }
+                    f_masks[pidx] = if win_mask != 0 {
+                        win_mask
+                    } else {
+                        1_u64 << first_nongap_idx
+                    };
+                }
+            }
+        }
+        for pidx in 0..n_nodes {
+            let u = order[pidx];
+            if u >= n {
+                let gm = g_masks[pidx];
+                if pidx > 0 {
+                    let pg = gap_mask[parent_pidx[pidx]][s];
+                    let p_bit = if pg { 2 } else { 1 };
+                    if (gm & p_bit) != 0 {
+                        gap_mask[pidx][s] = pg;
+                    } else {
+                        gap_mask[pidx][s] = (gm & 2) != 0;
+                    }
+                } else {
+                    gap_mask[pidx][s] = gm == 2;
+                }
+                let nmm = nm_masks[pidx];
+                if pidx > 0 {
+                    let pn = n_mask[parent_pidx[pidx]][s];
+                    let p_bit = if pn { 2 } else { 1 };
+                    if (nmm & p_bit) != 0 {
+                        n_mask[pidx][s] = pn;
+                    } else {
+                        n_mask[pidx][s] = (nmm & 2) != 0;
+                    }
+                } else {
+                    n_mask[pidx][s] = nmm == 2;
+                }
+                if gap_mask[pidx][s] {
+                    n_mask[pidx][s] = false;
+                }
+            }
+            let is_masked = gap_mask[pidx][s] || n_mask[pidx][s];
+            if u < n && !is_masked {
+                continue;
+            }
+            if u < n && is_masked {
+                node_seqs[pidx][s] = if pidx > 0 {
+                    node_seqs[parent_pidx[pidx]][s]
+                } else {
+                    alphabet[first_nongap_idx]
+                };
+                continue;
+            }
+            let mask = f_masks[pidx];
+            if pidx > 0 {
+                let p_sym = alpha_idx[node_seqs[parent_pidx[pidx]][s] as usize];
+                if (mask & (1_u64 << p_sym)) != 0 {
+                    node_seqs[pidx][s] = alphabet[p_sym];
+                    continue;
+                }
+            }
+            let best_sym = mask.trailing_zeros() as usize;
+            node_seqs[pidx][s] = alphabet[best_sym];
+        }
+    }
+
+    // 3. Identify beneficial shunts in preorder
+    let mut shunt_map: HashMap<usize, (usize, Vec<usize>)> = HashMap::new();
+    for sh in &res.shunts {
+        if let (Some(&idx_u), Some(&idx_v)) =
+            (node_to_pidx.get(&sh.node_u), node_to_pidx.get(&sh.node_v))
+        {
+            let (donor_idx, rec_idx) = if idx_u < idx_v {
+                (idx_u, idx_v)
+            } else {
+                (idx_v, idx_u)
+            };
+            if rec_idx > 0 && !shunt_map.contains_key(&rec_idx) {
+                let valid_sites: Vec<usize> =
+                    sh.sites.iter().copied().filter(|&s| s < l).collect();
+                if !valid_sites.is_empty() {
+                    shunt_map.insert(rec_idx, (donor_idx, valid_sites));
+                }
+            }
+        }
+    }
+
+    // 4. Encode sequence payload via Causal Phylogenetic Arithmetic Coder
+    let mut enc = ArithEncoder::new();
+    let is_canon = |b: u8| matches!(b, b'A' | b'C' | b'G' | b'T' | b'U' | b'a' | b'c' | b'g' | b't' | b'u');
+    let mut base_root_row = vec![1_u32; k_alpha];
+    for (i, &b) in alphabet.iter().enumerate() {
+        if is_canon(b) {
+            base_root_row[i] = 32;
+        }
+    }
+    if let Some(g_idx) = gap_sym_opt {
+        base_root_row[g_idx] = 0;
+    }
+    if let Some(n_idx) = n_sym_opt {
+        base_root_row[n_idx] = 0;
+    }
+    let mut root_ctx = vec![base_root_row; 16];
+    let mut r_prev1 = 0_usize;
+    let mut r_prev2 = 0_usize;
+    for s in 0..l {
+        let ctx = ((r_prev2 & 3) << 2) | (r_prev1 & 3);
+        let sym = alpha_idx[node_seqs[0][s] as usize];
+        enc.encode_categorical(sym, &root_ctx[ctx]);
+        root_ctx[ctx][sym] += 16;
+        r_prev2 = r_prev1;
+        r_prev1 = sym;
+    }
+
+    let mut gap_start_cnt = [2_u64, (l as u64) * 2];
+    let mut gap_cont_cnt = [20_u64, 4_u64];
+    if gap_sym_opt.is_some() {
+        let has_root_gap = gap_mask[0].iter().any(|&g| g);
+        enc.encode_bit(u8::from(has_root_gap), 4096);
+        if has_root_gap {
+            let mut in_run = false;
+            for s in 0..l {
+                let dg = gap_mask[0][s];
+                if !in_run {
+                    let p1 = ((65536 * gap_start_cnt[0]) / (gap_start_cnt[0] + gap_start_cnt[1]))
+                        .clamp(1, 65535) as u32;
+                    enc.encode_bit(u8::from(dg), p1);
+                    if dg {
+                        gap_start_cnt[0] += 1;
+                        in_run = true;
+                    } else {
+                        gap_start_cnt[1] += 1;
+                    }
+                } else {
+                    let p1 = ((65536 * gap_cont_cnt[0]) / (gap_cont_cnt[0] + gap_cont_cnt[1]))
+                        .clamp(1, 65535) as u32;
+                    enc.encode_bit(u8::from(dg), p1);
+                    if dg {
+                        gap_cont_cnt[0] += 1;
+                    } else {
+                        gap_cont_cnt[1] += 1;
+                        in_run = false;
+                    }
+                }
+            }
+        }
+    }
+
+    let mut n_start_cnt = [2_u64, (l as u64) * 2];
+    let mut n_cont_cnt = [20_u64, 4_u64];
+    if n_sym_opt.is_some() {
+        let has_root_n = n_mask[0].iter().any(|&g| g);
+        enc.encode_bit(u8::from(has_root_n), 4096);
+        if has_root_n {
+            let mut in_run = false;
+            for s in 0..l {
+                let dn = n_mask[0][s];
+                if !in_run {
+                    let p1 = ((65536 * n_start_cnt[0]) / (n_start_cnt[0] + n_start_cnt[1]))
+                        .clamp(1, 65535) as u32;
+                    enc.encode_bit(u8::from(dn), p1);
+                    if dn {
+                        n_start_cnt[0] += 1;
+                        in_run = true;
+                    } else {
+                        n_start_cnt[1] += 1;
+                    }
+                } else {
+                    let p1 = ((65536 * n_cont_cnt[0]) / (n_cont_cnt[0] + n_cont_cnt[1]))
+                        .clamp(1, 65535) as u32;
+                    enc.encode_bit(u8::from(dn), p1);
+                    if dn {
+                        n_cont_cnt[0] += 1;
+                    } else {
+                        n_cont_cnt[1] += 1;
+                        in_run = false;
+                    }
+                }
+            }
+        }
+    }
+
+    let mut mut_hist = vec![0_u32; l];
+    let mut codon_counts = [10_u32; 3];
+    let mut trans_counts = vec![vec![1_u32; k_alpha]; k_alpha];
+    for i in 0..k_alpha {
+        for j in 0..k_alpha {
+            if is_canon(alphabet[j]) {
+                trans_counts[i][j] = 16;
+            }
+        }
+        trans_counts[i][i] = 0;
+        if let Some(g_idx) = gap_sym_opt {
+            trans_counts[i][g_idx] = 0;
+        }
+        if let Some(n_idx) = n_sym_opt {
+            trans_counts[i][n_idx] = 0;
+        }
+    }
+    for &(b1, b2) in &[
+        (b'A', b'G'),
+        (b'G', b'A'),
+        (b'C', b'T'),
+        (b'T', b'C'),
+        (b'a', b'g'),
+        (b'g', b'a'),
+        (b'c', b't'),
+        (b't', b'c'),
+    ] {
+        if let (Some(i1), Some(i2)) = (
+            alphabet.iter().position(|&x| x == b1),
+            alphabet.iter().position(|&x| x == b2),
+        ) {
+            trans_counts[i1][i2] += 32;
+        }
+    }
+
+    for pidx in 1..n_nodes {
+        let p_i = parent_pidx[pidx];
+        let mut pred = node_seqs[p_i].clone();
+        if let Some((donor_i, sites)) = shunt_map.get(&pidx) {
+            for &s in sites {
+                pred[s] = node_seqs[*donor_i][s];
+            }
+        }
+        for s in 0..l {
+            if gap_mask[pidx][s] || n_mask[pidx][s] {
+                node_seqs[pidx][s] = pred[s];
+            }
+        }
+        let u_seq = &node_seqs[pidx];
+
+        if gap_sym_opt.is_some() {
+            let has_gap_diff = (0..l).any(|s| gap_mask[pidx][s] != gap_mask[p_i][s]);
+            enc.encode_bit(u8::from(has_gap_diff), 4096);
+            if has_gap_diff {
+                let mut in_run = false;
+                for s in 0..l {
+                    let diff_g = gap_mask[pidx][s] != gap_mask[p_i][s];
+                    if !in_run {
+                        let p1 = ((65536 * gap_start_cnt[0]) / (gap_start_cnt[0] + gap_start_cnt[1]))
+                            .clamp(1, 65535) as u32;
+                        enc.encode_bit(u8::from(diff_g), p1);
+                        if diff_g {
+                            gap_start_cnt[0] += 1;
+                            in_run = true;
+                        } else {
+                            gap_start_cnt[1] += 1;
+                        }
+                    } else {
+                        let p1 = ((65536 * gap_cont_cnt[0]) / (gap_cont_cnt[0] + gap_cont_cnt[1]))
+                            .clamp(1, 65535) as u32;
+                        enc.encode_bit(u8::from(diff_g), p1);
+                        if diff_g {
+                            gap_cont_cnt[0] += 1;
+                        } else {
+                            gap_cont_cnt[1] += 1;
+                            in_run = false;
+                        }
+                    }
+                }
+            }
+        }
+
+        if n_sym_opt.is_some() {
+            let has_n_diff = (0..l).any(|s| n_mask[pidx][s] != n_mask[p_i][s]);
+            enc.encode_bit(u8::from(has_n_diff), 4096);
+            if has_n_diff {
+                let mut in_run = false;
+                for s in 0..l {
+                    let diff_n = n_mask[pidx][s] != n_mask[p_i][s];
+                    if !in_run {
+                        let p1 = ((65536 * n_start_cnt[0]) / (n_start_cnt[0] + n_start_cnt[1]))
+                            .clamp(1, 65535) as u32;
+                        enc.encode_bit(u8::from(diff_n), p1);
+                        if diff_n {
+                            n_start_cnt[0] += 1;
+                            in_run = true;
+                        } else {
+                            n_start_cnt[1] += 1;
+                        }
+                    } else {
+                        let p1 = ((65536 * n_cont_cnt[0]) / (n_cont_cnt[0] + n_cont_cnt[1]))
+                            .clamp(1, 65535) as u32;
+                        enc.encode_bit(u8::from(diff_n), p1);
+                        if diff_n {
+                            n_cont_cnt[0] += 1;
+                        } else {
+                            n_cont_cnt[1] += 1;
+                            in_run = false;
+                        }
+                    }
+                }
+            }
+        }
+
+        let valid_sites: Vec<usize> = (0..l)
+            .filter(|&s| !gap_mask[pidx][s] && !n_mask[pidx][s])
+            .collect();
+        let mut_sites: Vec<usize> = valid_sites
+            .iter()
+            .copied()
+            .filter(|&s| pred[s] != u_seq[s])
+            .collect();
+        let m_u = mut_sites.len();
+        enc.encode_int_elias(m_u, 24000);
+        if m_u > 0 {
+            let mut_set: HashSet<usize> = mut_sites.into_iter().collect();
+            let c_sum = (codon_counts[0] + codon_counts[1] + codon_counts[2]) as f64;
+            let c_mult = [
+                3.0 * (codon_counts[0] as f64) / c_sum,
+                3.0 * (codon_counts[1] as f64) / c_sum,
+                3.0 * (codon_counts[2] as f64) / c_sum,
+            ];
+            let weights: Vec<f64> = valid_sites
+                .iter()
+                .map(|&s| (0.20 + 2.8 * (mut_hist[s] as f64)) * c_mult[s % 3])
+                .collect();
+            let mut w_rem: f64 = weights.iter().sum();
+            let mut m_rem = m_u;
+            let mut n_rem = valid_sites.len();
+
+            for (idx_s, &s) in valid_sites.iter().enumerate() {
+                if m_rem == 0 {
+                    break;
+                }
+                let is_mut = if m_rem == n_rem {
+                    true
+                } else {
+                    let prob = ((m_rem as f64) * weights[idx_s] / w_rem.max(1e-9)).clamp(1e-6, 0.999);
+                    let p1 = ((65536.0 * prob).round() as u32).clamp(1, 65535);
+                    let flag = mut_set.contains(&s);
+                    enc.encode_bit(u8::from(flag), p1);
+                    flag
+                };
+                w_rem -= weights[idx_s];
+                n_rem -= 1;
+                if is_mut {
+                    m_rem -= 1;
+                    let b_from = alpha_idx[pred[s] as usize];
+                    let b_to = alpha_idx[u_seq[s] as usize];
+                    let mut w_sub = trans_counts[b_from].clone();
+                    w_sub[b_from] = 0;
+                    if let Some(g_idx) = gap_sym_opt {
+                        w_sub[g_idx] = 0;
+                    }
+                    if let Some(n_idx) = n_sym_opt {
+                        w_sub[n_idx] = 0;
+                    }
+                    enc.encode_categorical(b_to, &w_sub);
+                    trans_counts[b_from][b_to] += 3;
+                    mut_hist[s] += 1;
+                    codon_counts[s % 3] += 1;
+                }
+            }
+        }
+    }
+
+    let seq_payload = enc.finish();
+
+    // 5. Serialize metadata header (taxon names, Newick string, preorder node table, and shunts)
+    let mut meta_raw: Vec<u8> = Vec::new();
+    let names_joined = names.join("\n");
+    let names_bytes = names_joined.as_bytes();
+    meta_raw.extend_from_slice(&(names_bytes.len() as u32).to_le_bytes());
+    meta_raw.extend_from_slice(names_bytes);
+
+    let nwk_bytes = res.newick.as_bytes();
+    meta_raw.extend_from_slice(&(nwk_bytes.len() as u32).to_le_bytes());
+    meta_raw.extend_from_slice(nwk_bytes);
+
+    for pidx in 0..n_nodes {
+        let u = order[pidx];
+        let is_leaf = u < n;
+        meta_raw.push(u8::from(is_leaf));
+        meta_raw.extend_from_slice(&(if is_leaf { u as u32 } else { 0 }).to_le_bytes());
+        meta_raw.extend_from_slice(&(parent_pidx[pidx] as u32).to_le_bytes());
+    }
+
+    meta_raw.extend_from_slice(&(shunt_map.len() as u16).to_le_bytes());
+    for (&rec_idx, (donor_idx, sites)) in &shunt_map {
+        meta_raw.extend_from_slice(&(rec_idx as u32).to_le_bytes());
+        meta_raw.extend_from_slice(&(*donor_idx as u32).to_le_bytes());
+        meta_raw.extend_from_slice(&(sites.len() as u32).to_le_bytes());
+        for &s in sites {
+            meta_raw.extend_from_slice(&(s as u32).to_le_bytes());
+        }
+    }
+
+    let meta_compressed = arith_compress_bytes_order0(&meta_raw);
+
+    // 6. Assemble final .bwz binary container
+    let mut out: Vec<u8> = Vec::new();
+    out.extend_from_slice(b"BWZ1");
+    out.extend_from_slice(&(n as u32).to_le_bytes());
+    out.extend_from_slice(&(l as u32).to_le_bytes());
+    out.extend_from_slice(&(n_nodes as u32).to_le_bytes());
+    out.extend_from_slice(&(k_alpha as u16).to_le_bytes());
+    out.extend_from_slice(&alphabet);
+    out.extend_from_slice(&(meta_raw.len() as u32).to_le_bytes());
+    out.extend_from_slice(&(meta_compressed.len() as u32).to_le_bytes());
+    out.extend_from_slice(&meta_compressed);
+    out.extend_from_slice(&(seq_payload.len() as u32).to_le_bytes());
+    out.extend_from_slice(&seq_payload);
+
+    let ln2 = std::f64::consts::LN_2;
+    let stats = BwzCompressionStats {
+        n_taxa: n,
+        n_sites: l,
+        raw_seq_bytes: n * l,
+        compressed_seq_bytes: seq_payload.len(),
+        compressed_header_bytes: out.len() - seq_payload.len(),
+        total_bwz_bytes: out.len(),
+        seq_mdl_nats: (seq_payload.len() as f64) * 8.0 * ln2,
+        total_bwz_nats: (out.len() as f64) * 8.0 * ln2,
+    };
+    Ok((out, stats))
+}
+
+/// Decompress a `.bwz` phylogenetic archive back into `(names, seqs, newick)` bit-for-bit.
+pub fn decompress_alignment_from_bwz(
+    data: &[u8],
+) -> Result<(Vec<String>, Vec<String>, String), String> {
+    if data.len() < 26 || &data[0..4] != b"BWZ1" {
+        return Err("Invalid .bwz file header (expected magic 'BWZ1')".to_string());
+    }
+    let mut pos = 4usize;
+    let read_u32 = |buf: &[u8], p: &mut usize| -> Result<u32, String> {
+        if *p + 4 > buf.len() {
+            return Err("Unexpected EOF in .bwz header".to_string());
+        }
+        let v = u32::from_le_bytes([buf[*p], buf[*p + 1], buf[*p + 2], buf[*p + 3]]);
+        *p += 4;
+        Ok(v)
+    };
+    let read_u16 = |buf: &[u8], p: &mut usize| -> Result<u16, String> {
+        if *p + 2 > buf.len() {
+            return Err("Unexpected EOF in .bwz header".to_string());
+        }
+        let v = u16::from_le_bytes([buf[*p], buf[*p + 1]]);
+        *p += 2;
+        Ok(v)
+    };
+
+    let n = read_u32(data, &mut pos)? as usize;
+    let l = read_u32(data, &mut pos)? as usize;
+    let n_nodes = read_u32(data, &mut pos)? as usize;
+    let k_alpha = read_u16(data, &mut pos)? as usize;
+    if pos + k_alpha > data.len() {
+        return Err("Unexpected EOF reading .bwz alphabet".to_string());
+    }
+    let alphabet: Vec<u8> = data[pos..pos + k_alpha].to_vec();
+    pos += k_alpha;
+
+    let mut alpha_idx = [0_usize; 256];
+    for (i, &b) in alphabet.iter().enumerate() {
+        alpha_idx[b as usize] = i;
+    }
+
+    let meta_raw_len = read_u32(data, &mut pos)? as usize;
+    let meta_comp_len = read_u32(data, &mut pos)? as usize;
+    if pos + meta_comp_len > data.len() {
+        return Err("Unexpected EOF reading .bwz metadata block".to_string());
+    }
+    let meta_raw = arith_decompress_bytes_order0(&data[pos..pos + meta_comp_len], meta_raw_len);
+    pos += meta_comp_len;
+
+    let seq_comp_len = read_u32(data, &mut pos)? as usize;
+    if pos + seq_comp_len > data.len() {
+        return Err("Unexpected EOF reading .bwz sequence payload".to_string());
+    }
+    let seq_payload = &data[pos..pos + seq_comp_len];
+
+    // Parse decompressed metadata
+    let mut mpos = 0usize;
+    let names_len = read_u32(&meta_raw, &mut mpos)? as usize;
+    let names_str = String::from_utf8(meta_raw[mpos..mpos + names_len].to_vec())
+        .map_err(|e| format!("UTF-8 error in .bwz taxon names: {e}"))?;
+    mpos += names_len;
+    let names: Vec<String> = names_str.split('\n').map(String::from).collect();
+
+    let nwk_len = read_u32(&meta_raw, &mut mpos)? as usize;
+    let newick = String::from_utf8(meta_raw[mpos..mpos + nwk_len].to_vec())
+        .map_err(|e| format!("UTF-8 error in .bwz Newick string: {e}"))?;
+    mpos += nwk_len;
+
+    let mut is_leaf_vec = Vec::with_capacity(n_nodes);
+    let mut leaf_id_vec = Vec::with_capacity(n_nodes);
+    let mut parent_pidx = Vec::with_capacity(n_nodes);
+    for _ in 0..n_nodes {
+        let is_l = meta_raw[mpos] != 0;
+        mpos += 1;
+        let lid = read_u32(&meta_raw, &mut mpos)? as usize;
+        let pid = read_u32(&meta_raw, &mut mpos)? as usize;
+        is_leaf_vec.push(is_l);
+        leaf_id_vec.push(lid);
+        parent_pidx.push(pid);
+    }
+
+    let n_shunts = read_u16(&meta_raw, &mut mpos)? as usize;
+    let mut shunt_map: HashMap<usize, (usize, Vec<usize>)> = HashMap::new();
+    for _ in 0..n_shunts {
+        let rec_idx = read_u32(&meta_raw, &mut mpos)? as usize;
+        let donor_idx = read_u32(&meta_raw, &mut mpos)? as usize;
+        let s_len = read_u32(&meta_raw, &mut mpos)? as usize;
+        let mut sites = Vec::with_capacity(s_len);
+        for _ in 0..s_len {
+            sites.push(read_u32(&meta_raw, &mut mpos)? as usize);
+        }
+        shunt_map.insert(rec_idx, (donor_idx, sites));
+    }
+
+    // Decode sequence payload in lockstep preorder
+    let mut dec = ArithDecoder::new(seq_payload);
+    let mut node_seqs: Vec<Vec<u8>> = vec![vec![0_u8; l]; n_nodes];
+    let mut gap_mask: Vec<Vec<bool>> = vec![vec![false; l]; n_nodes];
+    let mut n_mask: Vec<Vec<bool>> = vec![vec![false; l]; n_nodes];
+    let gap_sym_opt = alphabet.iter().position(|&x| x == b'-');
+    let n_sym_opt = alphabet.iter().position(|&x| x == b'N');
+    let is_canon = |b: u8| matches!(b, b'A' | b'C' | b'G' | b'T' | b'U' | b'a' | b'c' | b'g' | b't' | b'u');
+    let mut base_root_row = vec![1_u32; k_alpha];
+    for (i, &b) in alphabet.iter().enumerate() {
+        if is_canon(b) {
+            base_root_row[i] = 32;
+        }
+    }
+    if let Some(g_idx) = gap_sym_opt {
+        base_root_row[g_idx] = 0;
+    }
+    if let Some(n_idx) = n_sym_opt {
+        base_root_row[n_idx] = 0;
+    }
+    let mut root_ctx = vec![base_root_row; 16];
+    let mut r_prev1 = 0_usize;
+    let mut r_prev2 = 0_usize;
+    for s in 0..l {
+        let ctx = ((r_prev2 & 3) << 2) | (r_prev1 & 3);
+        let sym = dec.decode_categorical(&root_ctx[ctx]);
+        node_seqs[0][s] = alphabet[sym];
+        root_ctx[ctx][sym] += 16;
+        r_prev2 = r_prev1;
+        r_prev1 = sym;
+    }
+
+    let mut gap_start_cnt = [2_u64, (l as u64) * 2];
+    let mut gap_cont_cnt = [20_u64, 4_u64];
+    if gap_sym_opt.is_some() {
+        let has_root_gap = dec.decode_bit(4096) != 0;
+        if has_root_gap {
+            let mut in_run = false;
+            for s in 0..l {
+                let dg = if !in_run {
+                    let p1 = ((65536 * gap_start_cnt[0]) / (gap_start_cnt[0] + gap_start_cnt[1]))
+                        .clamp(1, 65535) as u32;
+                    let flag = dec.decode_bit(p1) != 0;
+                    if flag {
+                        gap_start_cnt[0] += 1;
+                        in_run = true;
+                    } else {
+                        gap_start_cnt[1] += 1;
+                    }
+                    flag
+                } else {
+                    let p1 = ((65536 * gap_cont_cnt[0]) / (gap_cont_cnt[0] + gap_cont_cnt[1]))
+                        .clamp(1, 65535) as u32;
+                    let flag = dec.decode_bit(p1) != 0;
+                    if flag {
+                        gap_cont_cnt[0] += 1;
+                    } else {
+                        gap_cont_cnt[1] += 1;
+                        in_run = false;
+                    }
+                    flag
+                };
+                gap_mask[0][s] = dg;
+            }
+        }
+    }
+
+    let mut n_start_cnt = [2_u64, (l as u64) * 2];
+    let mut n_cont_cnt = [20_u64, 4_u64];
+    if n_sym_opt.is_some() {
+        let has_root_n = dec.decode_bit(4096) != 0;
+        if has_root_n {
+            let mut in_run = false;
+            for s in 0..l {
+                let dn = if !in_run {
+                    let p1 = ((65536 * n_start_cnt[0]) / (n_start_cnt[0] + n_start_cnt[1]))
+                        .clamp(1, 65535) as u32;
+                    let flag = dec.decode_bit(p1) != 0;
+                    if flag {
+                        n_start_cnt[0] += 1;
+                        in_run = true;
+                    } else {
+                        n_start_cnt[1] += 1;
+                    }
+                    flag
+                } else {
+                    let p1 = ((65536 * n_cont_cnt[0]) / (n_cont_cnt[0] + n_cont_cnt[1]))
+                        .clamp(1, 65535) as u32;
+                    let flag = dec.decode_bit(p1) != 0;
+                    if flag {
+                        n_cont_cnt[0] += 1;
+                    } else {
+                        n_cont_cnt[1] += 1;
+                        in_run = false;
+                    }
+                    flag
+                };
+                n_mask[0][s] = dn;
+            }
+        }
+    }
+
+    let mut mut_hist = vec![0_u32; l];
+    let mut codon_counts = [10_u32; 3];
+    let mut trans_counts = vec![vec![1_u32; k_alpha]; k_alpha];
+    for i in 0..k_alpha {
+        for j in 0..k_alpha {
+            if is_canon(alphabet[j]) {
+                trans_counts[i][j] = 16;
+            }
+        }
+        trans_counts[i][i] = 0;
+        if let Some(g_idx) = gap_sym_opt {
+            trans_counts[i][g_idx] = 0;
+        }
+        if let Some(n_idx) = n_sym_opt {
+            trans_counts[i][n_idx] = 0;
+        }
+    }
+    for &(b1, b2) in &[
+        (b'A', b'G'),
+        (b'G', b'A'),
+        (b'C', b'T'),
+        (b'T', b'C'),
+        (b'a', b'g'),
+        (b'g', b'a'),
+        (b'c', b't'),
+        (b't', b'c'),
+    ] {
+        if let (Some(i1), Some(i2)) = (
+            alphabet.iter().position(|&x| x == b1),
+            alphabet.iter().position(|&x| x == b2),
+        ) {
+            trans_counts[i1][i2] += 32;
+        }
+    }
+
+    for pidx in 1..n_nodes {
+        let p_i = parent_pidx[pidx];
+        let mut pred = node_seqs[p_i].clone();
+        if let Some((donor_i, sites)) = shunt_map.get(&pidx) {
+            for &s in sites {
+                pred[s] = node_seqs[*donor_i][s];
+            }
+        }
+        let mut work_seq = pred.clone();
+        let mut work_gap = gap_mask[p_i].clone();
+        let mut work_n = n_mask[p_i].clone();
+
+        if gap_sym_opt.is_some() {
+            let has_gap_diff = dec.decode_bit(4096) != 0;
+            if has_gap_diff {
+                let mut in_run = false;
+                for s in 0..l {
+                    let diff_g = if !in_run {
+                        let p1 = ((65536 * gap_start_cnt[0]) / (gap_start_cnt[0] + gap_start_cnt[1]))
+                            .clamp(1, 65535) as u32;
+                        let flag = dec.decode_bit(p1) != 0;
+                        if flag {
+                            gap_start_cnt[0] += 1;
+                            in_run = true;
+                        } else {
+                            gap_start_cnt[1] += 1;
+                        }
+                        flag
+                    } else {
+                        let p1 = ((65536 * gap_cont_cnt[0]) / (gap_cont_cnt[0] + gap_cont_cnt[1]))
+                            .clamp(1, 65535) as u32;
+                        let flag = dec.decode_bit(p1) != 0;
+                        if flag {
+                            gap_cont_cnt[0] += 1;
+                        } else {
+                            gap_cont_cnt[1] += 1;
+                            in_run = false;
+                        }
+                        flag
+                    };
+                    if diff_g {
+                        work_gap[s] = !work_gap[s];
+                    }
+                }
+            }
+        }
+
+        if n_sym_opt.is_some() {
+            let has_n_diff = dec.decode_bit(4096) != 0;
+            if has_n_diff {
+                let mut in_run = false;
+                for s in 0..l {
+                    let diff_n = if !in_run {
+                        let p1 = ((65536 * n_start_cnt[0]) / (n_start_cnt[0] + n_start_cnt[1]))
+                            .clamp(1, 65535) as u32;
+                        let flag = dec.decode_bit(p1) != 0;
+                        if flag {
+                            n_start_cnt[0] += 1;
+                            in_run = true;
+                        } else {
+                            n_start_cnt[1] += 1;
+                        }
+                        flag
+                    } else {
+                        let p1 = ((65536 * n_cont_cnt[0]) / (n_cont_cnt[0] + n_cont_cnt[1]))
+                            .clamp(1, 65535) as u32;
+                        let flag = dec.decode_bit(p1) != 0;
+                        if flag {
+                            n_cont_cnt[0] += 1;
+                        } else {
+                            n_cont_cnt[1] += 1;
+                            in_run = false;
+                        }
+                        flag
+                    };
+                    if diff_n {
+                        work_n[s] = !work_n[s];
+                    }
+                }
+            }
+        }
+
+        let valid_sites: Vec<usize> = (0..l)
+            .filter(|&s| !work_gap[s] && !work_n[s])
+            .collect();
+        let m_u = dec.decode_int_elias(24000);
+        if m_u > 0 {
+            let c_sum = (codon_counts[0] + codon_counts[1] + codon_counts[2]) as f64;
+            let c_mult = [
+                3.0 * (codon_counts[0] as f64) / c_sum,
+                3.0 * (codon_counts[1] as f64) / c_sum,
+                3.0 * (codon_counts[2] as f64) / c_sum,
+            ];
+            let weights: Vec<f64> = valid_sites
+                .iter()
+                .map(|&s| (0.20 + 2.8 * (mut_hist[s] as f64)) * c_mult[s % 3])
+                .collect();
+            let mut w_rem: f64 = weights.iter().sum();
+            let mut m_rem = m_u;
+            let mut n_rem = valid_sites.len();
+
+            for (idx_s, &s) in valid_sites.iter().enumerate() {
+                if m_rem == 0 {
+                    break;
+                }
+                let is_mut = if m_rem == n_rem {
+                    true
+                } else {
+                    let prob = ((m_rem as f64) * weights[idx_s] / w_rem.max(1e-9)).clamp(1e-6, 0.999);
+                    let p1 = ((65536.0 * prob).round() as u32).clamp(1, 65535);
+                    dec.decode_bit(p1) != 0
+                };
+                w_rem -= weights[idx_s];
+                n_rem -= 1;
+                if is_mut {
+                    m_rem -= 1;
+                    let b_from = alpha_idx[pred[s] as usize];
+                    let mut w_sub = trans_counts[b_from].clone();
+                    w_sub[b_from] = 0;
+                    if let Some(g_idx) = gap_sym_opt {
+                        w_sub[g_idx] = 0;
+                    }
+                    if let Some(n_idx) = n_sym_opt {
+                        w_sub[n_idx] = 0;
+                    }
+                    let b_to = dec.decode_categorical(&w_sub);
+                    work_seq[s] = alphabet[b_to];
+                    trans_counts[b_from][b_to] += 3;
+                    mut_hist[s] += 1;
+                    codon_counts[s % 3] += 1;
+                }
+            }
+        }
+        node_seqs[pidx] = work_seq;
+        gap_mask[pidx] = work_gap;
+        n_mask[pidx] = work_n;
+    }
+
+    let mut restored_seqs: Vec<String> = vec![String::new(); n];
+    for pidx in 0..n_nodes {
+        if is_leaf_vec[pidx] {
+            let tid = leaf_id_vec[pidx];
+            if tid < n {
+                let mut leaf_bytes = node_seqs[pidx].clone();
+                for s in 0..l {
+                    if gap_mask[pidx][s] {
+                        leaf_bytes[s] = b'-';
+                    } else if n_mask[pidx][s] {
+                        leaf_bytes[s] = b'N';
+                    }
+                }
+                restored_seqs[tid] = String::from_utf8(leaf_bytes)
+                    .map_err(|e| format!("UTF-8 error in restored sequence {tid}: {e}"))?;
+            }
+        }
+    }
+
+    Ok((names, restored_seqs, newick))
+}
+
+// ---------------------------------------------------------------------------
 // WebAssembly Bindings (wasm32-unknown-unknown)
 // ---------------------------------------------------------------------------
 
@@ -6117,7 +7640,7 @@ impl WasmBushwhacker {
         Self
     }
 
-    /// Induce an MDL phylogenetic graph from a FASTA alignment string and return
+    /// Induce an MDL phylogenetic graph from a FASTA/PHYLIP/NEXUS alignment string and return
     /// a JSON-serialized `BushwhackerResult`.
     pub fn infer_fasta(
         &self,
@@ -6137,6 +7660,45 @@ impl WasmBushwhacker {
             .infer(&names, &seqs)
             .map_err(|e| JsValue::from_str(&e))?;
         serde_json::to_string(&res).map_err(|e| JsValue::from_str(&e.to_string()))
+    }
+
+    /// Compress an alignment (`fasta_text`) and its JSON-serialized `BushwhackerResult`
+    /// into a self-contained, bit-for-bit lossless `.bwz` binary archive.
+    pub fn compress_bwz(
+        &self,
+        fasta_text: &str,
+        result_json: &str,
+    ) -> Result<Vec<u8>, JsValue> {
+        let (names, seqs) =
+            parse_fasta_str(fasta_text).map_err(|e| JsValue::from_str(&e))?;
+        let res: BushwhackerResult = serde_json::from_str(result_json)
+            .map_err(|e| JsValue::from_str(&format!("Invalid BushwhackerResult JSON: {e}")))?;
+        let (bytes, _stats) = compress_alignment_to_bwz(&names, &seqs, &res)
+            .map_err(|e| JsValue::from_str(&e))?;
+        Ok(bytes)
+    }
+
+    /// Decompress a `.bwz` binary archive back into a JSON object `{ fasta, newick, n_taxa, n_sites }`.
+    pub fn decompress_bwz(&self, bwz_bytes: &[u8]) -> Result<String, JsValue> {
+        let (names, seqs, newick) =
+            decompress_alignment_from_bwz(bwz_bytes).map_err(|e| JsValue::from_str(&e))?;
+        let mut fasta = String::new();
+        for (name, seq) in names.iter().zip(seqs.iter()) {
+            fasta.push('>');
+            fasta.push_str(name);
+            fasta.push('\n');
+            fasta.push_str(seq);
+            fasta.push('\n');
+        }
+        let n_taxa = names.len();
+        let n_sites = seqs.first().map(|s| s.len()).unwrap_or(0);
+        let payload = serde_json::json!({
+            "fasta": fasta,
+            "newick": newick,
+            "n_taxa": n_taxa,
+            "n_sites": n_sites,
+        });
+        serde_json::to_string(&payload).map_err(|e| JsValue::from_str(&e.to_string()))
     }
 }
 
@@ -6282,6 +7844,31 @@ END;
         assert_eq!(sf, sp2);
         assert_eq!(sf, sp3);
         assert_eq!(sf, sn);
+    }
+
+    #[test]
+    fn test_bwz_lossless_roundtrip() {
+        let fasta = "\
+>Taxon_A1
+ACGTACGT---TACGTACGTACGTACGT
+>Taxon_A2
+ACGTACGT---TACGTACGAACGTACGT
+>Taxon_B1
+TGCATGCATGCTGCATGCATGCATGCAT
+>Taxon_B2
+TGCATGCATGCTGCATGCTTGCATGCAT
+>Taxon_C1
+TGCATGCANNNTGCATGCTTGCATGCAT
+";
+        let (names, seqs) = parse_fasta_str(fasta).unwrap();
+        let engine = BushwhackerEngine::default();
+        let res = engine.infer(&names, &seqs).unwrap();
+        let (bwz_bytes, stats) = compress_alignment_to_bwz(&names, &seqs, &res).unwrap();
+        assert!(stats.compressed_seq_bytes > 0);
+        let (dec_names, dec_seqs, dec_nwk) = decompress_alignment_from_bwz(&bwz_bytes).unwrap();
+        assert_eq!(names, dec_names);
+        assert_eq!(seqs, dec_seqs);
+        assert_eq!(res.newick, dec_nwk);
     }
 }
 

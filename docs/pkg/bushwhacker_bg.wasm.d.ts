@@ -2,6 +2,8 @@
 /* eslint-disable */
 export const memory: WebAssembly.Memory;
 export const __wbg_wasmbushwhacker_free: (a: number, b: number) => void;
+export const wasmbushwhacker_compress_bwz: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
+export const wasmbushwhacker_decompress_bwz: (a: number, b: number, c: number) => [number, number, number, number];
 export const wasmbushwhacker_infer_fasta: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
 export const wasmbushwhacker_new: () => number;
 export const __wbindgen_externrefs: WebAssembly.Table;
