@@ -3185,6 +3185,7 @@
           lEff += w;
         }
 
+        const cohortPrefixMap = inferCohortPrefixMap(names);
         // Build per-taxon QA records
         const seenSeqHash = new Map();
         const taxaRecords = [];
@@ -3218,7 +3219,7 @@
             manualTaxonExcluded.add(i);
           }
 
-          const taxMeta = lookupTaxonMetadata(rawName);
+          const taxMeta = lookupTaxonMetadata(rawName, cohortPrefixMap);
           taxaRecords.push({
             index: i,
             name: rawName,
@@ -3270,13 +3271,51 @@
       }
     }
 
-    function lookupTaxonMetadata(rawName) {
+    // Only accept underscore prefixes as cohort clades if they form 2..10 shared groups
+    // each with >= max(3, 4% of N) members and covering >= 60% of the cohort.
+    // This prevents strain/isolate IDs (like BE353_88, SEOUL45_1191 in InfluenzaA) from spawning ratusan labels.
+    function inferCohortPrefixMap(names) {
+      const map = new Map();
+      if (!names || names.length < 6) return map;
+      const counts = new Map();
+      for (const nm of names) {
+        if (SPECIES_TAXONOMY[nm]) continue;
+        const uIdx = nm.indexOf('_');
+        if (uIdx > 1) {
+          const p = nm.slice(0, uIdx);
+          if (!/^\d+$/.test(p)) {
+            counts.set(p, (counts.get(p) || 0) + 1);
+          }
+        }
+      }
+      const minGroupSize = Math.max(3, Math.ceil(names.length * 0.04));
+      const validPrefixes = [];
+      let covered = 0;
+      for (const [p, c] of counts.entries()) {
+        if (c >= minGroupSize) {
+          validPrefixes.push(p);
+          covered += c;
+        }
+      }
+      if (validPrefixes.length >= 2 && validPrefixes.length <= 10 && covered >= names.length * 0.60) {
+        const validSet = new Set(validPrefixes);
+        for (const nm of names) {
+          const uIdx = nm.indexOf('_');
+          if (uIdx > 1) {
+            const p = nm.slice(0, uIdx);
+            if (validSet.has(p)) map.set(nm, p);
+          }
+        }
+      }
+      return map;
+    }
+
+    function lookupTaxonMetadata(rawName, cohortPrefixMap = null) {
       if (SPECIES_TAXONOMY[rawName]) {
         return { commonName: SPECIES_TAXONOMY[rawName].name, clade: SPECIES_TAXONOMY[rawName].group };
       }
-      if (rawName.includes('_')) {
-        const prefix = rawName.split('_')[0];
-        return { commonName: '', clade: prefix };
+      if (cohortPrefixMap && cohortPrefixMap.has(rawName)) {
+        return { commonName: '', clade: cohortPrefixMap.get(rawName) };
       }
       return { commonName: '', clade: '' };
     }
@@ -3711,6 +3750,7 @@
       let rootId = customRootId !== null ? customRootId : findUnsupervisedDiameterMidpointRoot(adj, branchMap, n);
       if (!adj.has(rootId)) rootId = 0;
 
+      const cohortPrefixMap = inferCohortPrefixMap(res.names || []);
       nodeById.clear();
       allTreeNodes = [];
       const visited = new Set();
@@ -3723,7 +3763,7 @@
           ? branchMap.get(`${Math.min(u, parentId)}_${Math.max(u, parentId)}`)
           : null;
 
-        const meta = lookupTaxonMetadata(rawLabel);
+        const meta = u < n ? lookupTaxonMetadata(rawLabel, cohortPrefixMap) : { commonName: '', clade: '' };
         const node = {
           id: u,
           parentId,
@@ -3764,32 +3804,33 @@
 
     function assignCladeRibbonGroups(root) {
       groupColorMap.clear();
-      let hasExplicitGroups = false;
+      let explicitCount = 0;
       for (const nd of allTreeNodes) {
-        if (nd.isLeaf && nd.cladeGroup) {
-          hasExplicitGroups = true;
-          break;
-        }
+        if (nd.isLeaf && nd.cladeGroup) explicitCount++;
       }
+      const totalLeaves = Math.max(1, root ? root.leafCount : 1);
+      const hasExplicitGroups = explicitCount >= Math.min(3, totalLeaves);
 
       if (!hasExplicitGroups) {
-        let cladeCounter = 1;
-        function tagSubtree(nd, grp) {
-          nd.cladeGroup = grp;
-          for (const ch of nd.children) tagSubtree(ch, grp);
-        }
-        function walkDepth(nd, depth) {
-          if (nd.isLeaf) {
-            if (!nd.cladeGroup) nd.cladeGroup = `Clade ${cladeCounter++}`;
+        // Partition ordered leaves into at most 6 balanced topological clades
+        // snapped to monophyletic subtree boundaries where possible (never spawning dozens of singleton clades).
+        const orderedLeaves = [];
+        function collectLeaves(nd) {
+          if (nd.isLeaf || nd.children.length === 0) {
+            orderedLeaves.push(nd);
             return;
           }
-          if (depth >= 3 && nd.leafCount >= 3) {
-            tagSubtree(nd, `Clade ${cladeCounter++}`);
-            return;
-          }
-          for (const ch of nd.children) walkDepth(ch, depth + 1);
+          for (const ch of nd.children) collectLeaves(ch);
         }
-        walkDepth(root, 0);
+        collectLeaves(root);
+
+        const nL = orderedLeaves.length;
+        const targetK = nL <= 8 ? Math.max(1, Math.min(3, nL)) : Math.min(6, Math.max(3, Math.round(Math.log2(nL) - 1)));
+        const blockSize = Math.max(1, Math.ceil(nL / targetK));
+        for (let i = 0; i < nL; i++) {
+          const cladeIdx = Math.min(targetK, Math.floor(i / blockSize) + 1);
+          orderedLeaves[i].cladeGroup = `Clade ${cladeIdx}`;
+        }
       }
 
       function postOrderGroup(nd) {
@@ -3822,8 +3863,13 @@
       const bar = document.getElementById('legendBar');
       if (!bar) return;
       let html = '';
-      for (const [grp, col] of groupColorMap.entries()) {
+      const entries = Array.from(groupColorMap.entries());
+      const maxShown = 10;
+      for (const [grp, col] of entries.slice(0, maxShown)) {
         html += `<span><span class="swatch" style="background:${col};"></span>${escapeHtml(grp)}</span>`;
+      }
+      if (entries.length > maxShown) {
+        html += `<span style="color:var(--ink-muted); font-family:var(--font-mono); font-size:11px;">+${entries.length - maxShown} more</span>`;
       }
       html += `
         <span style="margin-left:auto; display:inline-flex; align-items:center; gap:12px;">
@@ -3895,7 +3941,7 @@
           nd.leafCount = 1;
           nd.leafIndices = [nd.id];
           nd.degree = 1;
-          nd.cladeGroup = lookupTaxonMetadata(nd.rawLabel).clade || null;
+          nd.cladeGroup = null;
         } else {
           nd.id = nextId++;
           nd.leafCount = 0;
@@ -3913,6 +3959,12 @@
         nodeById.set(nd.id, nd);
       }
       finalize(rawRoot, null);
+      const nwkPrefixMap = inferCohortPrefixMap(names);
+      for (const nd of allTreeNodes) {
+        if (nd.isLeaf) {
+          nd.cladeGroup = lookupTaxonMetadata(nd.rawLabel, nwkPrefixMap).clade || null;
+        }
+      }
 
       treeRoot = rawRoot;
       focusedSubtreeRoot = null;
@@ -4586,7 +4638,7 @@
       }
 
       // Polytomy Diamonds & Collapsed Wedges
-      const labelStep = Math.max(1, Math.ceil(11 / Math.max(0.5, rowH)));
+      const labelStep = Math.max(1, Math.ceil(13 / Math.max(0.5, rowH)));
       const qLower = searchQuery.toLowerCase();
 
       for (const nd of layout.visibleNodes) {
@@ -4627,7 +4679,7 @@
           ctx.closePath();
           ctx.fill();
           ctx.stroke();
-          if (rowH >= 7.5) {
+          if (rowH >= 11) {
             ctx.fillStyle = '#B45309';
             ctx.font = '700 9.5px JetBrains Mono, monospace';
             ctx.textBaseline = 'bottom';
@@ -4669,7 +4721,8 @@
           ctx.fillStyle = '#161615';
           ctx.font = `500 11px JetBrains Mono, monospace`;
         }
-        ctx.fillText(disp, x + 6, y);
+        const labelX = opts.showRibbons ? (maxTipX + 6) : (x + 6);
+        ctx.fillText(disp, labelX, y);
       }
     }
 
