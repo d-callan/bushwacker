@@ -23,14 +23,23 @@ self.onmessage = async (ev) => {
 
     await ensureInitialized();
 
-    if (type === 'infer_fasta') {
+    if (type === 'infer_alignment' || type === 'infer_fasta') {
       const t0 = performance.now();
-      const jsonStr = engine.infer_fasta(
-        String(msg.fastaText || ''),
-        Boolean(msg.codingAware),
-        Boolean(msg.detectShunts),
-        Number(msg.minShuntSites || 4)
-      );
+      const mode = String(msg.dataMode || 'auto');
+      const jsonStr = typeof engine.infer_alignment === 'function'
+        ? engine.infer_alignment(
+            String(msg.fastaText || ''),
+            mode,
+            Boolean(msg.codingAware),
+            Boolean(msg.detectShunts),
+            Number(msg.minShuntSites || 4)
+          )
+        : engine.infer_fasta(
+            String(msg.fastaText || ''),
+            Boolean(msg.codingAware),
+            Boolean(msg.detectShunts),
+            Number(msg.minShuntSites || 4)
+          );
       const wallMs = performance.now() - t0;
       self.postMessage({ id, type: 'infer_result', jsonStr, wallMs });
       return;

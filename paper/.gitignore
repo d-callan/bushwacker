@@ -1,0 +1,10 @@
+*.aux
+*.log
+*.out
+*.bbl
+*.blg
+*.synctex.gz
+.DS_Store
+bushwhacker_manuscript.*
+bushwhacker_report.*
+*.png

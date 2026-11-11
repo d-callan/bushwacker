@@ -17,6 +17,22 @@ use std::time::Instant;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
 
+pub mod discrete;
+pub mod nt_gtr;
+pub mod protein;
+
+/// Configure the global Rayon worker thread pool on native targets (`-T` / `--threads`).
+pub fn configure_thread_pool(num_threads: usize) {
+    #[cfg(not(target_arch = "wasm32"))]
+    if num_threads >= 1 {
+        let _ = rayon::ThreadPoolBuilder::new()
+            .num_threads(num_threads)
+            .build_global();
+    }
+    #[cfg(target_arch = "wasm32")]
+    let _ = num_threads;
+}
+
 // ---------------------------------------------------------------------------
 // Combinatorial Information-Theoretic Primitives (All in Nats)
 // ---------------------------------------------------------------------------
@@ -282,21 +298,30 @@ fn is_valid_seq_char(ch: char) -> bool {
     matches!(
         ch.to_ascii_uppercase(),
         'A' | 'C'
+            | 'D'
+            | 'E'
+            | 'F'
             | 'G'
+            | 'H'
+            | 'I'
+            | 'J'
+            | 'K'
+            | 'L'
+            | 'M'
+            | 'N'
+            | 'O'
+            | 'P'
+            | 'Q'
+            | 'R'
+            | 'S'
             | 'T'
             | 'U'
-            | 'N'
-            | 'R'
-            | 'Y'
-            | 'S'
-            | 'W'
-            | 'K'
-            | 'M'
-            | 'B'
-            | 'D'
-            | 'H'
             | 'V'
+            | 'W'
             | 'X'
+            | 'Y'
+            | 'Z'
+            | 'B'
             | '-'
             | '?'
             | '.'
@@ -982,6 +1007,9 @@ pub struct BushwhackerEngine {
     pub coding_aware: bool,
     pub detect_shunts: bool,
     pub min_shunt_sites: usize,
+    pub force_protein: bool,
+    pub translate_coding: bool,
+    pub discrete_mode: Option<discrete::DiscreteMode>,
 }
 
 impl Default for BushwhackerEngine {
@@ -990,6 +1018,9 @@ impl Default for BushwhackerEngine {
             coding_aware: true,
             detect_shunts: true,
             min_shunt_sites: 2,
+            force_protein: false,
+            translate_coding: false,
+            discrete_mode: None,
         }
     }
 }
@@ -1000,81 +1031,58 @@ impl BushwhackerEngine {
             coding_aware,
             detect_shunts,
             min_shunt_sites,
+            force_protein: false,
+            translate_coding: false,
+            discrete_mode: None,
         }
     }
 
     pub fn infer_from_fasta<P: AsRef<Path>>(&self, path: P) -> Result<BushwhackerResult, String> {
+        if let Some(d_mode) = self.discrete_mode {
+            let cm = discrete::parse_discrete_file(path)?;
+            return discrete::infer_discrete_mdl(self, &cm, d_mode, None);
+        }
         let (names, seqs) = parse_fasta_file(path)?;
         self.infer(&names, &seqs)
     }
 
     pub fn infer(&self, names: &[String], seqs: &[String]) -> Result<BushwhackerResult, String> {
+        if names.is_empty() {
+            return Err("Empty alignment provided.".to_string());
+        }
+        if let Some(d_mode) = self.discrete_mode {
+            let cm = discrete::encode_discrete_sequences(names, seqs)?;
+            return discrete::infer_discrete_mdl(self, &cm, d_mode, None);
+        }
+        if self.translate_coding && !protein::is_protein_alignment(seqs) {
+            let aa_seqs = protein::translate_coding_alignment(seqs)?;
+            return protein::infer_protein_mdl(self, names, &aa_seqs, None);
+        }
+        if self.force_protein || protein::is_protein_alignment(seqs) {
+            return protein::infer_protein_mdl(self, names, seqs, None);
+        }
         #[cfg(not(target_arch = "wasm32"))]
         let t0 = Instant::now();
         let n = names.len();
-        if n == 0 {
-            return Err("Empty alignment provided.".to_string());
-        }
         let (mat, bitmasks, majority_state, _, l) = encode_nucleotide_alignment(seqs);
 
         let total_valid: usize = mat.iter().filter(|&&x| x >= 0).count();
         let l_eff = ((total_valid as f64) / (n as f64)).clamp(1.0, l as f64);
 
         let (ti_cost, tv_cost) = self.estimate_subst_surprise(&mat, n, l);
-        let (raw_dist_w, raw_tree_w, is_coding) = if self.coding_aware {
+        let (_, _, is_coding) = if self.coding_aware {
             detect_coding_frame_and_weights(&mat, n, l)
         } else {
             (vec![1.0; l], vec![1.0; l], false)
         };
+        let tree_weights = vec![1.0; l];
 
-        // Pure unsupervised Four-Gamete compatibility weights (Hypothesis H0)
-        let (dw_h0, tw_h0) =
-            self.compute_dual_site_coherence_weights(&mat, n, l, &vec![1.0; l], &vec![1.0; l]);
-
-        // If coding_aware detected an open reading frame, use Rissanen Two-Part MDL model
-        // selection (charging ln(2) nats for the 1-bit model choice) to select between H0
-        // (pure Four-Gamete compatibility) and H1 (synonymous-boost / nonsynonymous-damped prior).
-        let (dist_weights, tree_weights) = if self.coding_aware && is_coding && n >= 5 {
-            let (dw_h1, tw_h1) =
-                self.compute_dual_site_coherence_weights(&mat, n, l, &raw_dist_w, &raw_tree_w);
-            if self.select_coding_weights_by_mdl(
-                names,
-                &mat,
-                &bitmasks,
-                &majority_state,
-                &dw_h0,
-                &tw_h0,
-                &dw_h1,
-                &tw_h1,
-                n,
-                l,
-                l_eff,
-                ti_cost,
-                tv_cost,
-            ) {
-                (dw_h1, tw_h1)
-            } else {
-                (dw_h0, tw_h0)
-            }
-        } else {
-            (dw_h0, tw_h0)
-        };
-
-        // Step 1 & 2: Sub-quadratic O(N log N * L) 3-point terminal loads & candidate backbone
-        let (terminal_loads, mut adj, node_labels) = self.build_subquadratic_loads_and_backbone(
-            names,
-            &mat,
-            &bitmasks,
-            &dist_weights,
-            &tree_weights,
-            n,
-            l,
-            l_eff,
-            ti_cost,
-            tv_cost,
-        );
+        // Step 1 & 2: Exact Jin-Nei BioNJ + 64-site SoA GTR+CAT8 Eigen-Felsenstein-Rissanen MDL backbone
+        let (terminal_loads, mut adj, node_labels, gtr_edge_stats) =
+            self.build_nt_gtr_loads_and_backbone(names, &mat, &bitmasks, n, l, l_eff);
 
         let pre_step3_adj = adj.clone();
+        let need_fitch_muts = self.detect_shunts && n >= 4;
 
         // Step 3: MDL Edge Contraction + Polytomy Hub Clique Expansion
         let (adj_c, mut branches, _, edge_mutations) = self.contract_unsupported_edges_mdl(
@@ -1090,25 +1098,45 @@ impl BushwhackerEngine {
             &tree_weights,
             &mut node_labels.clone(),
             true,
+            gtr_edge_stats.as_ref(),
+            need_fitch_muts,
         );
         adj = adj_c;
 
         // Build the strict binary refinement of the MDL-certified tree `adj` (preserving 100% of
-        // certified positive-MDL splits including hub expansions, while resolving any remaining
-        // degree >= 4 polytomy hubs via compatible pre-contraction splits and ancestral Fitch states).
-        let bin_adj = self.build_binary_refinement_from_mdl(
-            &adj,
-            &pre_step3_adj,
+        // certified positive-MDL splits; when `gtr_edge_stats` is present and `pre_step3_adj` is
+        // already binary, `pre_step3_adj` is an exact topological refinement of `adj`).
+        let bin_adj = if gtr_edge_stats.is_some()
+            && pre_step3_adj
+                .iter()
+                .all(|(&u, nbs)| u < n || nbs.is_empty() || nbs.len() == 3)
+        {
+            pre_step3_adj
+        } else {
+            self.build_binary_refinement_from_mdl(
+                &adj,
+                &pre_step3_adj,
+                &bitmasks,
+                &terminal_loads,
+                n,
+                l,
+                l_eff,
+                ti_cost,
+                tv_cost,
+                &tree_weights,
+            )
+        };
+        let binary_newick = self.serialize_binary_newick(
+            &bin_adj,
+            names,
             &bitmasks,
+            &majority_state,
             &terminal_loads,
             n,
             l,
             l_eff,
-            ti_cost,
-            tv_cost,
-            &tree_weights,
+            gtr_edge_stats.as_ref().map(|x| &x.0),
         );
-        let binary_newick = self.serialize_newick(&bin_adj, names, &[], n);
         // Refresh node labels for any hub-expanded nodes
         let mut full_labels = node_labels;
         for &u in adj.keys() {
@@ -1174,6 +1202,8 @@ impl BushwhackerEngine {
                         &tree_weights,
                         &mut full_labels,
                         false,
+                        None,
+                        true,
                     );
                     adj = adj_re;
                     branches = branches_re;
@@ -1537,6 +1567,7 @@ impl BushwhackerEngine {
                 l_eff,
                 ti_cost,
                 tv_cost,
+                true,
             );
             let (adj_c, branches_c, _, _) = self.contract_unsupported_edges_mdl(
                 adj_0,
@@ -1551,12 +1582,19 @@ impl BushwhackerEngine {
                 tw,
                 &mut labels_0,
                 true,
+                None,
+                true,
             );
             self.compute_tree_total_mdl_nats(&adj_c, &branches_c, l_eff)
         };
 
-        let mdl_h0 = eval_hypothesis(dw_h0, tw_h0);
-        let mdl_h1 = eval_hypothesis(dw_h1, tw_h1);
+        #[cfg(not(target_arch = "wasm32"))]
+        let (mdl_h0, mdl_h1) = rayon::join(
+            || eval_hypothesis(dw_h0, tw_h0),
+            || eval_hypothesis(dw_h1, tw_h1),
+        );
+        #[cfg(target_arch = "wasm32")]
+        let (mdl_h0, mdl_h1) = (eval_hypothesis(dw_h0, tw_h0), eval_hypothesis(dw_h1, tw_h1));
         // Require H1 to compress the alignment by at least ln(2) nats (1-bit model choice)
         mdl_h1 + 2.0_f64.ln() < mdl_h0
     }
@@ -2548,23 +2586,21 @@ impl BushwhackerEngine {
     /// (or once `target_roots` subtrees remain), that subtree root graduates directly to the
     /// next tournament level rather than being forced into an artificial monophyletic cluster.
     #[allow(clippy::too_many_arguments)]
-    fn agglomerate_witnessed_cluster(
+    fn agglomerate_witnessed_cluster_pure(
         &self,
         cluster_nodes: &[usize],
         witness_nodes: &[usize],
-        seqs: &mut HashMap<usize, PackedSeq64>,
+        seqs: &HashMap<usize, PackedSeq64>,
         site_weights: &[f64],
         word_weight_sums: &[f64],
         l_eff: f64,
         inv_alpha: f64,
-        adj: &mut BTreeMap<usize, Vec<usize>>,
-        node_labels: &mut BTreeMap<usize, String>,
-        next_node: &mut usize,
         target_roots: usize,
-    ) -> Vec<usize> {
+    ) -> (Vec<usize>, Vec<(usize, usize, PackedSeq64)>) {
+        const TEMP_BASE: usize = usize::MAX / 2;
         let m_c = cluster_nodes.len();
         if m_c <= target_roots.max(1) {
-            return cluster_nodes.to_vec();
+            return (cluster_nodes.to_vec(), Vec::new());
         }
         let mut local_to_global: Vec<usize> =
             Vec::with_capacity(m_c + witness_nodes.len());
@@ -2618,6 +2654,7 @@ impl BushwhackerEngine {
 
         let mut active_c_count = m_c;
         let mut graduated: Vec<usize> = Vec::new();
+        let mut merges: Vec<(usize, usize, PackedSeq64)> = Vec::with_capacity(m_c);
 
         while active_c_count > target_roots && active_c_count >= 2 {
             let k = active.len();
@@ -2647,9 +2684,6 @@ impl BushwhackerEngine {
                 }
             }
 
-            // If the global minimum-Q pair involves an external witness, graduate the
-            // cluster node directly to the next tournament level (and mark it as a witness
-            // in the local matrix) instead of forcing it into an artificial intra-cluster merge.
             let (qa, qb) = best_pair;
             if is_witness[active[qa]] != is_witness[active[qb]] {
                 let c_local = if !is_witness[active[qa]] {
@@ -2669,16 +2703,10 @@ impl BushwhackerEngine {
             let gu = local_to_global[lu];
             let gv = local_to_global[lv];
 
-            let gw = *next_node;
-            *next_node += 1;
+            let gw = TEMP_BASE + merges.len();
             let lw = local_to_global.len();
             local_to_global.push(gw);
             is_witness.push(false);
-
-            adj.entry(gw).or_default().extend([gu, gv]);
-            adj.entry(gu).or_default().push(gw);
-            adj.entry(gv).or_default().push(gw);
-            node_labels.insert(gw, format!("N{gw}"));
 
             let others: Vec<usize> = active
                 .iter()
@@ -2695,8 +2723,12 @@ impl BushwhackerEngine {
                 })
                 .map(|lx| local_to_global[lx])
                 .unwrap_or(gu);
-            let sw = PackedSeq64::merge_steiner_median(&seqs[&gu], &seqs[&gv], &seqs[&gr]);
-            seqs.insert(gw, sw);
+            let sw = PackedSeq64::merge_steiner_median(
+                if gu >= TEMP_BASE { &merges[gu - TEMP_BASE].2 } else { &seqs[&gu] },
+                if gv >= TEMP_BASE { &merges[gv - TEMP_BASE].2 } else { &seqs[&gv] },
+                if gr >= TEMP_BASE { &merges[gr - TEMP_BASE].2 } else { &seqs[&gr] },
+            );
+            merges.push((gu, gv, sw));
 
             let d_uv = d_mat[lu * cap + lv];
             let v_uv = v_mat[lu * cap + lv].max(1e-6);
@@ -2741,7 +2773,177 @@ impl BushwhackerEngine {
                 graduated.push(local_to_global[lx]);
             }
         }
-        graduated
+        (graduated, merges)
+    }
+
+    fn build_nt_gtr_loads_and_backbone(
+        &self,
+        names: &[String],
+        mat: &[i8],
+        bitmasks: &[u8],
+        n: usize,
+        l: usize,
+        l_eff: f64,
+    ) -> (
+        Vec<f64>,
+        BTreeMap<usize, Vec<usize>>,
+        BTreeMap<usize, String>,
+        Option<(HashMap<(usize, usize), (f64, f64)>, f64)>,
+    ) {
+        let mut node_labels: BTreeMap<usize, String> =
+            (0..n).map(|i| (i, names[i].clone())).collect();
+        let mut adj: BTreeMap<usize, Vec<usize>> = (0..n).map(|i| (i, Vec::new())).collect();
+
+        if n == 1 {
+            return (vec![0.5; 1], adj, node_labels, None);
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        let packed_vec: Vec<PackedSeq64> = (0..n)
+            .into_par_iter()
+            .map(|i| PackedSeq64::from_row(&mat[i * l..(i + 1) * l]))
+            .collect();
+        #[cfg(target_arch = "wasm32")]
+        let packed_vec: Vec<PackedSeq64> = (0..n)
+            .map(|i| PackedSeq64::from_row(&mat[i * l..(i + 1) * l]))
+            .collect();
+
+        if n == 2 {
+            let d01 = Self::compute_pair_unweighted_jc_dist_packed(
+                &packed_vec[0],
+                &packed_vec[1],
+                l_eff,
+                0.0,
+            );
+            let ld = (d01 * 0.5).max(0.5);
+            adj.get_mut(&0).unwrap().push(1);
+            adj.get_mut(&1).unwrap().push(0);
+            return (vec![ld, ld], adj, node_labels, None);
+        }
+
+        let inv_alpha = Self::estimate_site_rate_inv_alpha(&packed_vec, bitmasks, n, l, l_eff);
+        if n <= 4096 {
+            #[cfg(not(target_arch = "wasm32"))]
+            let uw_rows: Vec<Vec<f64>> = (0..n)
+                .into_par_iter()
+                .map(|i| {
+                    let mut row = vec![0.0_f64; n];
+                    let pi = &packed_vec[i];
+                    for j in 0..n {
+                        if i != j {
+                            row[j] = Self::compute_pair_unweighted_jc_dist_packed(
+                                pi,
+                                &packed_vec[j],
+                                l_eff,
+                                inv_alpha,
+                            );
+                        }
+                    }
+                    row
+                })
+                .collect();
+            #[cfg(target_arch = "wasm32")]
+            let uw_rows: Vec<Vec<f64>> = (0..n)
+                .map(|i| {
+                    let mut row = vec![0.0_f64; n];
+                    let pi = &packed_vec[i];
+                    for j in 0..n {
+                        if i != j {
+                            row[j] = Self::compute_pair_unweighted_jc_dist_packed(
+                                pi,
+                                &packed_vec[j],
+                                l_eff,
+                                inv_alpha,
+                            );
+                        }
+                    }
+                    row
+                })
+                .collect();
+
+            let calc_load = |i: usize| -> f64 {
+                let row_i = &uw_rows[i];
+                let mut j_near = if i == 0 { 1 } else { 0 };
+                let mut d_min = row_i[j_near];
+                for j in 0..n {
+                    if j != i && row_i[j] < d_min {
+                        d_min = row_i[j];
+                        j_near = j;
+                    }
+                }
+                let row_near = &uw_rows[j_near];
+                let mut deltas: Vec<f64> = (0..n)
+                    .filter(|&k| k != i && k != j_near)
+                    .map(|k| row_i[k] - row_near[k])
+                    .collect();
+                let med = median_f64(&mut deltas);
+                (0.5 * (d_min + med)).clamp(0.4, d_min.max(0.8))
+            };
+            #[cfg(not(target_arch = "wasm32"))]
+            let loads: Vec<f64> = (0..n).into_par_iter().map(calc_load).collect();
+            #[cfg(target_arch = "wasm32")]
+            let loads: Vec<f64> = (0..n).map(calc_load).collect();
+
+            if n == 3 {
+                let center = n;
+                adj.insert(center, vec![0, 1, 2]);
+                node_labels.insert(center, format!("N{center}"));
+                for i in 0..3 {
+                    adj.get_mut(&i).unwrap().push(center);
+                }
+                return (loads, adj, node_labels, None);
+            }
+
+            let mut uw_dist: Vec<f64> = Vec::with_capacity(n * n);
+            for row in uw_rows {
+                uw_dist.extend_from_slice(&row);
+            }
+            let all_ids: Vec<usize> = (0..n).collect();
+            let mut next_node = n;
+            let mut edge_lens: HashMap<(usize, usize), f64> = HashMap::with_capacity(2 * n);
+            nt_gtr::agglomerate_nt_bionj_from_dist(
+                &all_ids,
+                uw_dist,
+                Some((&mut edge_lens, l_eff)),
+                &mut adj,
+                &mut node_labels,
+                &mut next_node,
+            );
+            let gtr_stats = nt_gtr::refine_and_score_nt_gtr_mdl(
+                &mut adj, &mut edge_lens, mat, bitmasks, n, l, l_eff,
+            );
+            return (loads, adj, node_labels, Some(gtr_stats));
+        }
+
+        // Subquadratic Voronoi-portal initial skeleton + 64-site SoA GTR+CAT8 refinement for N > 4096
+        let ones = vec![1.0_f64; l];
+        let (loads, mut adj_sub, labels_sub) = self.build_subquadratic_loads_and_backbone(
+            names, mat, bitmasks, &ones, &ones, n, l, l_eff, 1.0, 1.5, false,
+        );
+        let mut edge_lens: HashMap<(usize, usize), f64> = HashMap::with_capacity(2 * n);
+        for (&u, nbs) in &adj_sub {
+            for &v in nbs {
+                if u < v {
+                    let t_init = if u < n {
+                        (loads[u] / l_eff.max(1.0)).clamp(1e-4, 1.5)
+                    } else if v < n {
+                        (loads[v] / l_eff.max(1.0)).clamp(1e-4, 1.5)
+                    } else {
+                        0.02
+                    };
+                    edge_lens.insert((u, v), t_init);
+                }
+            }
+        }
+        let gtr_stats = nt_gtr::refine_and_score_nt_gtr_mdl(
+            &mut adj_sub,
+            &mut edge_lens,
+            mat,
+            bitmasks,
+            n,
+            l,
+            l_eff,
+        );
+        (loads, adj_sub, labels_sub, Some(gtr_stats))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2757,6 +2959,7 @@ impl BushwhackerEngine {
         l_eff: f64,
         ti_cost: f64,
         tv_cost: f64,
+        run_fitch_nni: bool,
     ) -> (Vec<f64>, BTreeMap<usize, Vec<usize>>, BTreeMap<usize, String>) {
         let mut node_labels: BTreeMap<usize, String> =
             (0..n).map(|i| (i, names[i].clone())).collect();
@@ -2765,6 +2968,12 @@ impl BushwhackerEngine {
         if n == 1 {
             return (vec![0.5; 1], adj, node_labels);
         }
+        #[cfg(not(target_arch = "wasm32"))]
+        let packed_vec: Vec<PackedSeq64> = (0..n)
+            .into_par_iter()
+            .map(|i| PackedSeq64::from_row(&mat[i * l..(i + 1) * l]))
+            .collect();
+        #[cfg(target_arch = "wasm32")]
         let packed_vec: Vec<PackedSeq64> = (0..n)
             .map(|i| PackedSeq64::from_row(&mat[i * l..(i + 1) * l]))
             .collect();
@@ -2915,19 +3124,21 @@ impl BushwhackerEngine {
                 &mut next_node,
                 false,
             );
-            let nni_rounds = if n <= 512 { 5 } else { 2 };
-            self.refine_backbone_nni_mdl(
-                &mut adj,
-                bitmasks,
-                &loads,
-                n,
-                l,
-                l_eff,
-                ti_cost,
-                tv_cost,
-                tree_weights,
-                nni_rounds,
-            );
+            if run_fitch_nni {
+                let nni_rounds = if n <= 512 { 5 } else { 2 };
+                self.refine_backbone_nni_mdl(
+                    &mut adj,
+                    bitmasks,
+                    &loads,
+                    n,
+                    l,
+                    l_eff,
+                    ti_cost,
+                    tv_cost,
+                    tree_weights,
+                    nni_rounds,
+                );
+            }
             return (loads, adj, node_labels);
         }
 
@@ -3005,13 +3216,14 @@ impl BushwhackerEngine {
         }
 
         // Outgroup-Witnessed Partial Agglomeration tournament in O(N log N * L / 64)
+        const TEMP_BASE: usize = usize::MAX / 2;
         let mut next_node = n;
         let mut current_clusters = leaf_clusters;
         let mut prev_root_count = n;
         let current_roots: Vec<usize> = loop {
             let n_cl = current_clusters.len();
-            let mut next_roots = Vec::new();
-            for (c_idx, cluster) in current_clusters.iter().enumerate() {
+            let run_one_cluster = |c_idx: usize| -> (Vec<usize>, Vec<(usize, usize, PackedSeq64)>) {
+                let cluster = &current_clusters[c_idx];
                 let mut witnesses: Vec<usize> = Vec::with_capacity(20);
                 if c_idx > 0 {
                     for &w in current_clusters[c_idx - 1].iter().rev().take(6) {
@@ -3028,20 +3240,47 @@ impl BushwhackerEngine {
                         witnesses.push(ga);
                     }
                 }
-                let grad = self.agglomerate_witnessed_cluster(
+                self.agglomerate_witnessed_cluster_pure(
                     cluster,
                     &witnesses,
-                    &mut seqs_map,
+                    &seqs_map,
                     dist_weights,
                     &word_weight_sums,
                     l_eff,
                     inv_alpha,
-                    &mut adj,
-                    &mut node_labels,
-                    &mut next_node,
                     8,
-                );
-                next_roots.extend(grad);
+                )
+            };
+
+            #[cfg(not(target_arch = "wasm32"))]
+            let cluster_results: Vec<(Vec<usize>, Vec<(usize, usize, PackedSeq64)>)> =
+                (0..n_cl).into_par_iter().map(run_one_cluster).collect();
+            #[cfg(target_arch = "wasm32")]
+            let cluster_results: Vec<(Vec<usize>, Vec<(usize, usize, PackedSeq64)>)> =
+                (0..n_cl).map(run_one_cluster).collect();
+
+            let mut next_roots = Vec::new();
+            for (raw_grad, merges) in cluster_results {
+                let base_id = next_node;
+                next_node += merges.len();
+                let remap = |x: usize| -> usize {
+                    if x >= TEMP_BASE {
+                        base_id + (x - TEMP_BASE)
+                    } else {
+                        x
+                    }
+                };
+                for (m_idx, (raw_u, raw_v, sw)) in merges.into_iter().enumerate() {
+                    let gw = base_id + m_idx;
+                    let gu = remap(raw_u);
+                    let gv = remap(raw_v);
+                    adj.entry(gw).or_default().extend([gu, gv]);
+                    adj.entry(gu).or_default().push(gw);
+                    adj.entry(gv).or_default().push(gw);
+                    node_labels.insert(gw, format!("N{gw}"));
+                    seqs_map.insert(gw, sw);
+                }
+                next_roots.extend(raw_grad.into_iter().map(remap));
             }
             if next_roots.len() <= 160 || next_roots.len() * 5 >= prev_root_count * 4 {
                 break next_roots;
@@ -3075,19 +3314,21 @@ impl BushwhackerEngine {
             false,
         );
 
-        let nni_rounds = if n <= 1024 { 5 } else { 3 };
-        self.refine_backbone_nni_mdl(
-            &mut adj,
-            bitmasks,
-            &loads,
-            n,
-            l,
-            l_eff,
-            ti_cost,
-            tv_cost,
-            tree_weights,
-            nni_rounds,
-        );
+        if run_fitch_nni {
+            let nni_rounds = if n <= 1024 { 5 } else { 3 };
+            self.refine_backbone_nni_mdl(
+                &mut adj,
+                bitmasks,
+                &loads,
+                n,
+                l,
+                l_eff,
+                ti_cost,
+                tv_cost,
+                tree_weights,
+                nni_rounds,
+            );
+        }
         (loads, adj, node_labels)
     }
 
@@ -3096,18 +3337,22 @@ impl BushwhackerEngine {
         states: &mut HashMap<(usize, usize), (Vec<u8>, f64)>,
         mut queue: VecDeque<(usize, usize, u8)>,
         n: usize,
+        mut dirty_out: Option<&mut HashSet<(usize, usize)>>,
     ) {
         while let Some((x, y, depth)) = queue.pop_front() {
             if x < n {
                 continue;
             }
-            let children: Vec<(Vec<u8>, f64)> = adj[&x]
+            let child_refs: Vec<(&[u8], f64)> = adj[&x]
                 .iter()
                 .copied()
                 .filter(|&nb| nb != y)
-                .map(|nb| states[&(nb, x)].clone())
+                .map(|nb| {
+                    let st = &states[&(nb, x)];
+                    (st.0.as_slice(), st.1)
+                })
                 .collect();
-            let new_state = Self::combine_fitch_children(&children);
+            let new_state = Self::combine_fitch_children_refs(&child_refs);
             let changed = match states.get(&(x, y)) {
                 Some((old_mask, old_load)) => {
                     new_state.0 != *old_mask || (new_state.1 - *old_load).abs() > 1e-4
@@ -3115,11 +3360,51 @@ impl BushwhackerEngine {
                 None => true,
             };
             states.insert((x, y), new_state);
+            if let Some(ref mut dset) = dirty_out {
+                dset.insert((x, y));
+            }
             let max_d = if n <= 1024 { 12 } else { 4 };
             if changed && depth < max_d && y >= n {
                 for &z in &adj[&y] {
                     if z != x {
                         queue.push_back((y, z, depth + 1));
+                    }
+                }
+            }
+        }
+    }
+
+    fn propagate_directed_fitch_outward_exact(
+        adj: &BTreeMap<usize, Vec<usize>>,
+        states: &mut HashMap<(usize, usize), (Vec<u8>, f64)>,
+        mut queue: VecDeque<(usize, usize)>,
+        n: usize,
+    ) {
+        while let Some((x, y)) = queue.pop_front() {
+            if x < n {
+                continue;
+            }
+            let child_refs: Vec<(&[u8], f64)> = adj[&x]
+                .iter()
+                .copied()
+                .filter(|&nb| nb != y)
+                .map(|nb| {
+                    let st = &states[&(nb, x)];
+                    (st.0.as_slice(), st.1)
+                })
+                .collect();
+            let new_state = Self::combine_fitch_children_refs(&child_refs);
+            let changed = match states.get(&(x, y)) {
+                Some((old_mask, old_load)) => {
+                    new_state.0 != *old_mask || (new_state.1 - *old_load).abs() > 1e-11
+                }
+                None => true,
+            };
+            states.insert((x, y), new_state);
+            if changed && y >= n {
+                for &z in &adj[&y] {
+                    if z != x {
+                        queue.push_back((y, z));
                     }
                 }
             }
@@ -3157,55 +3442,96 @@ impl BushwhackerEngine {
                 }
             }
 
-            for (u, v) in internal_edges {
+            let eval_nni_edge = |u: usize, v: usize, cur_adj: &BTreeMap<usize, Vec<usize>>, cur_states: &HashMap<(usize, usize), (Vec<u8>, f64)>| -> (usize, usize, usize, usize, f64, f64, f64) {
+                let mut u_it = cur_adj[&u].iter().copied().filter(|&x| x != v);
+                let mut v_it = cur_adj[&v].iter().copied().filter(|&y| y != u);
+                let (a, b) = (u_it.next().unwrap(), u_it.next().unwrap());
+                let (c, d) = (v_it.next().unwrap(), v_it.next().unwrap());
+                let sa = &cur_states[&(a, u)];
+                let sb = &cur_states[&(b, u)];
+                let sc = &cur_states[&(c, v)];
+                let sd = &cur_states[&(d, v)];
+                let ra = (sa.0.as_slice(), sa.1);
+                let rb = (sb.0.as_slice(), sb.1);
+                let rc = (sc.0.as_slice(), sc.1);
+                let rd = (sd.0.as_slice(), sd.1);
+                let (g0, _, _) = self.compute_split_mdl_gain_from_child_refs(
+                    &[ra, rb],
+                    &[rc, rd],
+                    l,
+                    l_eff,
+                    ti_cost,
+                    tv_cost,
+                    site_weights,
+                );
+                let (g1, _, _) = self.compute_split_mdl_gain_from_child_refs(
+                    &[ra, rc],
+                    &[rb, rd],
+                    l,
+                    l_eff,
+                    ti_cost,
+                    tv_cost,
+                    site_weights,
+                );
+                let (g2, _, _) = self.compute_split_mdl_gain_from_child_refs(
+                    &[ra, rd],
+                    &[rb, rc],
+                    l,
+                    l_eff,
+                    ti_cost,
+                    tv_cost,
+                    site_weights,
+                );
+                (a, b, c, d, g0, g1, g2)
+            };
+
+            #[cfg(not(target_arch = "wasm32"))]
+            let pre_evals: Vec<(usize, usize, usize, usize, f64, f64, f64)> = internal_edges
+                .par_iter()
+                .map(|&(u, v)| eval_nni_edge(u, v, adj, &states))
+                .collect();
+
+            #[cfg(target_arch = "wasm32")]
+            let pre_evals: Vec<(usize, usize, usize, usize, f64, f64, f64)> = internal_edges
+                .iter()
+                .map(|&(u, v)| eval_nni_edge(u, v, adj, &states))
+                .collect();
+
+            let mut dirty_directed: HashSet<(usize, usize)> = HashSet::new();
+
+            for (idx, (u, v)) in internal_edges.into_iter().enumerate() {
                 if !adj.get(&u).map(|x| x.contains(&v)).unwrap_or(false)
                     || adj[&u].len() != 3
                     || adj[&v].len() != 3
                 {
                     continue;
                 }
-                let u_nbs: Vec<usize> = adj[&u].iter().copied().filter(|&x| x != v).collect();
-                let v_nbs: Vec<usize> = adj[&v].iter().copied().filter(|&y| y != u).collect();
-                let (a, b) = (u_nbs[0], u_nbs[1]);
-                let (c, d) = (v_nbs[0], v_nbs[1]);
+                let mut u_it = adj[&u].iter().copied().filter(|&x| x != v);
+                let mut v_it = adj[&v].iter().copied().filter(|&y| y != u);
+                let (a, b) = (u_it.next().unwrap(), u_it.next().unwrap());
+                let (c, d) = (v_it.next().unwrap(), v_it.next().unwrap());
 
-                let ta = states[&(a, u)].clone();
-                let tb = states[&(b, u)].clone();
-                let tc = states[&(c, v)].clone();
-                let td = states[&(d, v)].clone();
+                let (a0, b0, c0, d0, pg0, pg1, pg2) = pre_evals[idx];
+                let is_clean = (a, b, c, d) == (a0, b0, c0, d0)
+                    && !dirty_directed.contains(&(a, u))
+                    && !dirty_directed.contains(&(b, u))
+                    && !dirty_directed.contains(&(c, v))
+                    && !dirty_directed.contains(&(d, v));
 
-                let (g0, _, _) = self.compute_split_mdl_gain_from_children(
-                    &[ta.clone(), tb.clone()],
-                    &[tc.clone(), td.clone()],
-                    l,
-                    l_eff,
-                    ti_cost,
-                    tv_cost,
-                    site_weights,
-                );
-                let (g1, _, _) = self.compute_split_mdl_gain_from_children(
-                    &[ta.clone(), tc.clone()],
-                    &[tb.clone(), td.clone()],
-                    l,
-                    l_eff,
-                    ti_cost,
-                    tv_cost,
-                    site_weights,
-                );
-                let (g2, _, _) = self.compute_split_mdl_gain_from_children(
-                    &[ta, td],
-                    &[tb.clone(), tc],
-                    l,
-                    l_eff,
-                    ti_cost,
-                    tv_cost,
-                    site_weights,
-                );
+                let (g0, g1, g2) = if is_clean {
+                    (pg0, pg1, pg2)
+                } else {
+                    let (_, _, _, _, rg0, rg1, rg2) = eval_nni_edge(u, v, adj, &states);
+                    (rg0, rg1, rg2)
+                };
 
                 let best_g = g0.max(g1).max(g2);
                 if best_g > g0 + 0.10 {
                     let (swap_v, keep_v) = if g1 >= g2 { (c, d) } else { (d, c) };
-                    let t_swap_v = states[&(swap_v, v)].clone();
+                    let tb = states.remove(&(b, u)).unwrap();
+                    let t_swap_v = states.remove(&(swap_v, v)).unwrap();
+                    states.remove(&(u, b));
+                    states.remove(&(v, swap_v));
 
                     adj.get_mut(&u).unwrap().retain(|&x| x != b);
                     adj.get_mut(&b).unwrap().retain(|&x| x != u);
@@ -3217,26 +3543,40 @@ impl BushwhackerEngine {
                     adj.get_mut(&v).unwrap().push(b);
                     adj.get_mut(&b).unwrap().push(v);
 
-                    states.remove(&(b, u));
-                    states.remove(&(u, b));
-                    states.remove(&(swap_v, v));
-                    states.remove(&(v, swap_v));
                     states.insert((b, v), tb);
                     states.insert((swap_v, u), t_swap_v);
+                    dirty_directed.insert((b, v));
+                    dirty_directed.insert((swap_v, u));
 
-                    let st_uv = Self::combine_fitch_children(&[
-                        states[&(a, u)].clone(),
-                        states[&(swap_v, u)].clone(),
-                    ]);
-                    let st_vu = Self::combine_fitch_children(&[
-                        states[&(keep_v, v)].clone(),
-                        states[&(b, v)].clone(),
-                    ]);
+                    let st_uv = {
+                        let sa = &states[&(a, u)];
+                        let ssw = &states[&(swap_v, u)];
+                        Self::combine_fitch_children_refs(&[
+                            (sa.0.as_slice(), sa.1),
+                            (ssw.0.as_slice(), ssw.1),
+                        ])
+                    };
+                    let st_vu = {
+                        let skv = &states[&(keep_v, v)];
+                        let sbv = &states[&(b, v)];
+                        Self::combine_fitch_children_refs(&[
+                            (skv.0.as_slice(), skv.1),
+                            (sbv.0.as_slice(), sbv.1),
+                        ])
+                    };
                     states.insert((u, v), st_uv);
                     states.insert((v, u), st_vu);
+                    dirty_directed.insert((u, v));
+                    dirty_directed.insert((v, u));
 
                     let q = VecDeque::from([(u, a, 0), (u, swap_v, 0), (v, keep_v, 0), (v, b, 0)]);
-                    Self::propagate_directed_fitch_outward(adj, &mut states, q, n);
+                    Self::propagate_directed_fitch_outward(
+                        adj,
+                        &mut states,
+                        q,
+                        n,
+                        Some(&mut dirty_directed),
+                    );
                     improved = true;
                 }
             }
@@ -3248,6 +3588,154 @@ impl BushwhackerEngine {
                     .filter(|(&w, nbs)| w >= n && nbs.len() == 3)
                     .map(|(&w, _)| w)
                     .collect();
+
+                let eval_2hop_triple =
+                    |w: usize,
+                     u: usize,
+                     v: usize,
+                     adj_map: &BTreeMap<usize, Vec<usize>>,
+                     st_map: &HashMap<(usize, usize), (Vec<u8>, f64)>|
+                     -> Option<(usize, usize, usize, usize, usize, Option<(usize, usize)>)> {
+                        if adj_map.get(&w).map(|x| x.len()) != Some(3)
+                            || adj_map.get(&u).map(|x| x.len()) != Some(3)
+                            || adj_map.get(&v).map(|x| x.len()) != Some(3)
+                            || !adj_map[&u].contains(&w)
+                            || !adj_map[&v].contains(&w)
+                        {
+                            return None;
+                        }
+                        let m_list: Vec<usize> = adj_map[&w]
+                            .iter()
+                            .copied()
+                            .filter(|&x| x != u && x != v)
+                            .collect();
+                        if m_list.len() != 1 {
+                            return None;
+                        }
+                        let m_node = m_list[0];
+                        let u_ch: Vec<usize> =
+                            adj_map[&u].iter().copied().filter(|&x| x != w).collect();
+                        let v_ch: Vec<usize> =
+                            adj_map[&v].iter().copied().filter(|&y| y != w).collect();
+                        if u_ch.len() != 2 || v_ch.len() != 2 {
+                            return None;
+                        }
+                        let (a, b) = (u_ch[0], u_ch[1]);
+                        let (c, d) = (v_ch[0], v_ch[1]);
+
+                        let ta = st_map.get(&(a, u))?;
+                        let tb = st_map.get(&(b, u))?;
+                        let tc = st_map.get(&(c, v))?;
+                        let td = st_map.get(&(d, v))?;
+                        let tm = st_map.get(&(m_node, w))?;
+
+                        let ra = (ta.0.as_slice(), ta.1);
+                        let rb = (tb.0.as_slice(), tb.1);
+                        let rc = (tc.0.as_slice(), tc.1);
+                        let rd = (td.0.as_slice(), td.1);
+                        let rm = (tm.0.as_slice(), tm.1);
+
+                        let t_u_curr = Self::combine_fitch_children_refs(&[ra, rb]);
+                        let t_v_curr = Self::combine_fitch_children_refs(&[rc, rd]);
+                        let (g_uw_0, _, _) = self.compute_split_mdl_gain_from_child_refs(
+                            &[ra, rb],
+                            &[rm, (t_v_curr.0.as_slice(), t_u_curr.1.max(0.0) * 0.0 + t_v_curr.1)],
+                            l,
+                            l_eff,
+                            ti_cost,
+                            tv_cost,
+                            site_weights,
+                        );
+                        let (g_wv_0, _, _) = self.compute_split_mdl_gain_from_child_refs(
+                            &[rc, rd],
+                            &[rm, (t_u_curr.0.as_slice(), t_u_curr.1)],
+                            l,
+                            l_eff,
+                            ti_cost,
+                            tv_cost,
+                            site_weights,
+                        );
+                        let base_2hop = g_uw_0 + g_wv_0;
+                        let mut best_swap_gain = base_2hop + 0.50;
+                        let mut best_pair: Option<(usize, usize)> = None;
+
+                        for (u_swap, r_us, r_uk) in [(a, ra, rb), (b, rb, ra)] {
+                            for (v_swap, r_vs, r_vk) in [(c, rc, rd), (d, rd, rc)] {
+                                let t_u_new = Self::combine_fitch_children_refs(&[r_uk, r_vs]);
+                                let t_v_new = Self::combine_fitch_children_refs(&[r_vk, r_us]);
+                                let (g_uw_n, _, _) = self.compute_split_mdl_gain_from_child_refs(
+                                    &[r_uk, r_vs],
+                                    &[rm, (t_v_new.0.as_slice(), t_v_new.1)],
+                                    l,
+                                    l_eff,
+                                    ti_cost,
+                                    tv_cost,
+                                    site_weights,
+                                );
+                                let (g_wv_n, _, _) = self.compute_split_mdl_gain_from_child_refs(
+                                    &[r_vk, r_us],
+                                    &[rm, (t_u_new.0.as_slice(), t_u_new.1)],
+                                    l,
+                                    l_eff,
+                                    ti_cost,
+                                    tv_cost,
+                                    site_weights,
+                                );
+                                if (g_uw_n + g_wv_n) > best_swap_gain {
+                                    best_swap_gain = g_uw_n + g_wv_n;
+                                    best_pair = Some((u_swap, v_swap));
+                                }
+                            }
+                        }
+                        Some((a, b, c, d, m_node, best_pair))
+                    };
+
+                let mut init_triples: Vec<(usize, usize, usize)> = Vec::new();
+                for &w in &int_nodes {
+                    if let Some(nbs) = adj.get(&w) {
+                        if nbs.len() == 3 {
+                            let int_nbs: Vec<usize> = nbs
+                                .iter()
+                                .copied()
+                                .filter(|&x| x >= n && adj.get(&x).map(|v| v.len()) == Some(3))
+                                .collect();
+                            for idx_i in 0..int_nbs.len() {
+                                for idx_j in (idx_i + 1)..int_nbs.len() {
+                                    init_triples.push((w, int_nbs[idx_i], int_nbs[idx_j]));
+                                }
+                            }
+                        }
+                    }
+                }
+
+                #[cfg(not(target_arch = "wasm32"))]
+                let pre_2hop_vec: Vec<(
+                    (usize, usize, usize),
+                    Option<(usize, usize, usize, usize, usize, Option<(usize, usize)>)>,
+                )> = init_triples
+                    .par_iter()
+                    .map(|&(w, u, v)| ((w, u, v), eval_2hop_triple(w, u, v, adj, &states)))
+                    .collect();
+                #[cfg(target_arch = "wasm32")]
+                let pre_2hop_vec: Vec<(
+                    (usize, usize, usize),
+                    Option<(usize, usize, usize, usize, usize, Option<(usize, usize)>)>,
+                )> = init_triples
+                    .iter()
+                    .map(|&(w, u, v)| ((w, u, v), eval_2hop_triple(w, u, v, adj, &states)))
+                    .collect();
+
+                let mut pre_2hop: HashMap<
+                    (usize, usize, usize),
+                    (usize, usize, usize, usize, usize, Option<(usize, usize)>),
+                > = HashMap::with_capacity(pre_2hop_vec.len());
+                for (k, val) in pre_2hop_vec {
+                    if let Some(v_some) = val {
+                        pre_2hop.insert(k, v_some);
+                    }
+                }
+
+                let mut dirty_2hop: HashSet<(usize, usize)> = HashSet::new();
 
                 for w in int_nodes {
                     if adj.get(&w).map(|x| x.len()) != Some(3) {
@@ -3289,80 +3777,31 @@ impl BushwhackerEngine {
                             let (a, b) = (u_ch[0], u_ch[1]);
                             let (c, d) = (v_ch[0], v_ch[1]);
 
-                            let ta = states[&(a, u)].clone();
-                            let tb = states[&(b, u)].clone();
-                            let tc = states[&(c, v)].clone();
-                            let td = states[&(d, v)].clone();
-                            let tm = states[&(m_node, w)].clone();
-
-                            let t_u_curr = Self::combine_fitch_children(&[ta.clone(), tb.clone()]);
-                            let t_v_curr = Self::combine_fitch_children(&[tc.clone(), td.clone()]);
-                            let (g_uw_0, _, _) = self.compute_split_mdl_gain_from_children(
-                                &[ta.clone(), tb.clone()],
-                                &[tm.clone(), t_v_curr],
-                                l,
-                                l_eff,
-                                ti_cost,
-                                tv_cost,
-                                site_weights,
-                            );
-                            let (g_wv_0, _, _) = self.compute_split_mdl_gain_from_children(
-                                &[tc.clone(), td.clone()],
-                                &[tm.clone(), t_u_curr],
-                                l,
-                                l_eff,
-                                ti_cost,
-                                tv_cost,
-                                site_weights,
-                            );
-                            let base_2hop = g_uw_0 + g_wv_0;
-                            let mut best_swap_gain = base_2hop + 0.50;
-                            let mut best_pair: Option<(usize, usize)> = None;
-
-                            for (u_swap, t_us, t_uk) in
-                                [(a, ta.clone(), tb.clone()), (b, tb.clone(), ta.clone())]
+                            let best_pair = if let Some(&(pa, pb, pc, pd, pm, pbest)) =
+                                pre_2hop.get(&(w, u, v))
                             {
-                                for (v_swap, t_vs, t_vk) in
-                                    [(c, tc.clone(), td.clone()), (d, td.clone(), tc.clone())]
+                                if (a, b, c, d, m_node) == (pa, pb, pc, pd, pm)
+                                    && !dirty_2hop.contains(&(a, u))
+                                    && !dirty_2hop.contains(&(b, u))
+                                    && !dirty_2hop.contains(&(c, v))
+                                    && !dirty_2hop.contains(&(d, v))
+                                    && !dirty_2hop.contains(&(m_node, w))
                                 {
-                                    let t_u_new = Self::combine_fitch_children(&[
-                                        t_uk.clone(),
-                                        t_vs.clone(),
-                                    ]);
-                                    let t_v_new = Self::combine_fitch_children(&[
-                                        t_vk.clone(),
-                                        t_us.clone(),
-                                    ]);
-                                    let (g_uw_n, _, _) = self.compute_split_mdl_gain_from_children(
-                                        &[t_uk.clone(), t_vs],
-                                        &[tm.clone(), t_v_new],
-                                        l,
-                                        l_eff,
-                                        ti_cost,
-                                        tv_cost,
-                                        site_weights,
-                                    );
-                                    let (g_wv_n, _, _) = self.compute_split_mdl_gain_from_children(
-                                        &[t_vk, t_us.clone()],
-                                        &[tm.clone(), t_u_new],
-                                        l,
-                                        l_eff,
-                                        ti_cost,
-                                        tv_cost,
-                                        site_weights,
-                                    );
-                                    if (g_uw_n + g_wv_n) > best_swap_gain {
-                                        best_swap_gain = g_uw_n + g_wv_n;
-                                        best_pair = Some((u_swap, v_swap));
-                                    }
+                                    pbest
+                                } else {
+                                    eval_2hop_triple(w, u, v, adj, &states).and_then(|x| x.5)
                                 }
-                            }
+                            } else {
+                                eval_2hop_triple(w, u, v, adj, &states).and_then(|x| x.5)
+                            };
 
                             if let Some((u_swap, v_swap)) = best_pair {
                                 let u_keep = if u_swap == a { b } else { a };
                                 let v_keep = if v_swap == c { d } else { c };
-                                let t_us = states[&(u_swap, u)].clone();
-                                let t_vs = states[&(v_swap, v)].clone();
+                                let t_us = states.remove(&(u_swap, u)).unwrap();
+                                let t_vs = states.remove(&(v_swap, v)).unwrap();
+                                states.remove(&(u, u_swap));
+                                states.remove(&(v, v_swap));
 
                                 adj.get_mut(&u).unwrap().retain(|&x| x != u_swap);
                                 adj.get_mut(&u_swap).unwrap().retain(|&x| x != u);
@@ -3374,34 +3813,49 @@ impl BushwhackerEngine {
                                 adj.get_mut(&v).unwrap().push(u_swap);
                                 adj.get_mut(&u_swap).unwrap().push(v);
 
-                                states.remove(&(u_swap, u));
-                                states.remove(&(u, u_swap));
-                                states.remove(&(v_swap, v));
-                                states.remove(&(v, v_swap));
                                 states.insert((u_swap, v), t_us);
                                 states.insert((v_swap, u), t_vs);
+                                dirty_2hop.insert((u_swap, v));
+                                dirty_2hop.insert((v_swap, u));
 
-                                let st_uw = Self::combine_fitch_children(&[
-                                    states[&(u_keep, u)].clone(),
-                                    states[&(v_swap, u)].clone(),
-                                ]);
-                                let st_vw = Self::combine_fitch_children(&[
-                                    states[&(v_keep, v)].clone(),
-                                    states[&(u_swap, v)].clone(),
-                                ]);
-                                states.insert((u, w), st_uw.clone());
-                                states.insert((v, w), st_vw.clone());
-
-                                let st_wu = Self::combine_fitch_children(&[
-                                    states[&(m_node, w)].clone(),
-                                    st_vw,
-                                ]);
-                                let st_wv = Self::combine_fitch_children(&[
-                                    states[&(m_node, w)].clone(),
-                                    st_uw,
-                                ]);
+                                let st_uw = {
+                                    let ruk = &states[&(u_keep, u)];
+                                    let rvs = &states[&(v_swap, u)];
+                                    Self::combine_fitch_children_refs(&[
+                                        (ruk.0.as_slice(), ruk.1),
+                                        (rvs.0.as_slice(), rvs.1),
+                                    ])
+                                };
+                                let st_vw = {
+                                    let rvk = &states[&(v_keep, v)];
+                                    let rus = &states[&(u_swap, v)];
+                                    Self::combine_fitch_children_refs(&[
+                                        (rvk.0.as_slice(), rvk.1),
+                                        (rus.0.as_slice(), rus.1),
+                                    ])
+                                };
+                                let st_wu = {
+                                    let rm = &states[&(m_node, w)];
+                                    Self::combine_fitch_children_refs(&[
+                                        (rm.0.as_slice(), rm.1),
+                                        (st_vw.0.as_slice(), st_vw.1),
+                                    ])
+                                };
+                                let st_wv = {
+                                    let rm = &states[&(m_node, w)];
+                                    Self::combine_fitch_children_refs(&[
+                                        (rm.0.as_slice(), rm.1),
+                                        (st_uw.0.as_slice(), st_uw.1),
+                                    ])
+                                };
+                                states.insert((u, w), st_uw);
+                                states.insert((v, w), st_vw);
                                 states.insert((w, u), st_wu);
                                 states.insert((w, v), st_wv);
+                                dirty_2hop.insert((u, w));
+                                dirty_2hop.insert((v, w));
+                                dirty_2hop.insert((w, u));
+                                dirty_2hop.insert((w, v));
 
                                 let q = VecDeque::from([
                                     (u, u_keep, 0),
@@ -3410,7 +3864,13 @@ impl BushwhackerEngine {
                                     (v, u_swap, 0),
                                     (w, m_node, 0),
                                 ]);
-                                Self::propagate_directed_fitch_outward(adj, &mut states, q, n);
+                                Self::propagate_directed_fitch_outward(
+                                    adj,
+                                    &mut states,
+                                    q,
+                                    n,
+                                    Some(&mut dirty_2hop),
+                                );
                                 improved = true;
                             }
                         }
@@ -3565,6 +4025,30 @@ impl BushwhackerEngine {
                 let b_alt = ((seed >> 58) as u8) & 3;
                 masks.push((1u8 << b_pick) | (1u8 << b_alt));
             }
+            #[cfg(not(target_arch = "wasm32"))]
+            let mut scored: Vec<(f64, usize)> = (0..m)
+                .into_par_iter()
+                .map(|idx| {
+                    let (s, u) = movable[idx];
+                    if let Some((s_mask, _)) = states.get(&(s, u)) {
+                        let mut hits = 0i32;
+                        let mut val = 0i32;
+                        for (&b, &pm) in s_mask.iter().zip(&masks) {
+                            if b != 15 {
+                                val += 1;
+                                if (b & pm) != 0 {
+                                    hits += 1;
+                                }
+                            }
+                        }
+                        ((hits as f64) / (val.max(1) as f64), idx)
+                    } else {
+                        (0.0, idx)
+                    }
+                })
+                .collect();
+
+            #[cfg(target_arch = "wasm32")]
             let mut scored: Vec<(f64, usize)> = (0..m)
                 .map(|idx| {
                     let (s, u) = movable[idx];
@@ -3601,255 +4085,131 @@ impl BushwhackerEngine {
             }
         }
 
+        #[cfg(not(target_arch = "wasm32"))]
+        cand_peers.par_iter_mut().for_each(|peers| {
+            peers.sort_unstable();
+            peers.dedup();
+        });
+        #[cfg(target_arch = "wasm32")]
+        cand_peers.iter_mut().for_each(|peers| {
+            peers.sort_unstable();
+            peers.dedup();
+        });
+
         let mean_sub = (0.5 * (ti_cost + tv_cost)).max(1e-6);
         let ti_w = (ti_cost / mean_sub).clamp(0.85, 1.05);
         let tv_w = (tv_cost / mean_sub).clamp(0.95, 1.18);
         let min_step = 0.85 * ti_w;
 
-        let mut any_moved = false;
-        for idx in 0..m {
-            let (s, u) = movable[idx];
-            if adj.get(&u).map(|v| v.len()) != Some(3) || !adj[&u].contains(&s) {
-                continue;
-            }
-            let u_others: Vec<usize> = adj[&u].iter().copied().filter(|&x| x != s).collect();
-            if u_others.len() != 2 {
-                continue;
-            }
-            let (a, b) = (u_others[0], u_others[1]);
-            if adj[&a].contains(&b) {
-                continue;
-            }
+        let eval_spr_prescreen =
+            |idx: usize,
+             adj_map: &BTreeMap<usize, Vec<usize>>,
+             st_map: &HashMap<(usize, usize), (Vec<u8>, f64)>|
+             -> Option<(
+                usize,
+                usize,
+                f64,
+                Vec<usize>,
+                Vec<(usize, usize)>,
+                Vec<(f64, usize, usize)>,
+            )> {
+                let (s, u) = movable[idx];
+                if adj_map.get(&u).map(|v| v.len()) != Some(3) || !adj_map[&u].contains(&s) {
+                    return None;
+                }
+                let mut u_it = adj_map[&u].iter().copied().filter(|&x| x != s);
+                let (Some(a), Some(b)) = (u_it.next(), u_it.next()) else {
+                    return None;
+                };
+                if adj_map.get(&a).map(|v| v.contains(&b)).unwrap_or(false) {
+                    return None;
+                }
+                let (Some(ts), Some(ta), Some(tb)) =
+                    (st_map.get(&(s, u)), st_map.get(&(a, u)), st_map.get(&(b, u)))
+                else {
+                    return None;
+                };
+                let base_cost =
+                    Self::fitch_insert_cost_pair(&ts.0, &ta.0, &tb.0, ti_w, tv_w, site_weights);
+                if base_cost <= min_step {
+                    return Some((a, b, base_cost, Vec::new(), Vec::new(), Vec::new()));
+                }
 
-            let Some(ts) = states.get(&(s, u)).cloned() else {
-                continue;
-            };
-            let Some(ta) = states.get(&(a, u)).cloned() else {
-                continue;
-            };
-            let Some(tb) = states.get(&(b, u)).cloned() else {
-                continue;
-            };
-            let base_cost =
-                Self::fitch_insert_cost_pair(&ts.0, &ta.0, &tb.0, ti_w, tv_w, site_weights);
-            if base_cost <= min_step {
-                continue;
-            }
-
-            // Optional O(1) bounded check if `s` is a small clade (<= 16 nodes) to allow
-            // long-range JL peer jumps beyond the BFS radius without cycle risk.
-            let mut sub_s: Vec<usize> = vec![s];
-            let mut q_idx = 0;
-            while q_idx < sub_s.len() && sub_s.len() <= 17 {
-                let curr = sub_s[q_idx];
-                q_idx += 1;
-                if let Some(cnbs) = adj.get(&curr) {
-                    for &nx in cnbs {
-                        if nx != u && !sub_s.contains(&nx) {
-                            sub_s.push(nx);
-                            if sub_s.len() > 17 {
-                                break;
+                let mut sub_s: Vec<usize> = vec![s];
+                let mut q_idx = 0;
+                while q_idx < sub_s.len() && sub_s.len() <= 17 {
+                    let curr = sub_s[q_idx];
+                    q_idx += 1;
+                    if let Some(cnbs) = adj_map.get(&curr) {
+                        for &nx in cnbs {
+                            if nx != u && !sub_s.contains(&nx) {
+                                sub_s.push(nx);
+                                if sub_s.len() > 17 {
+                                    break;
+                                }
                             }
                         }
                     }
                 }
-            }
-            let s_is_small = sub_s.len() <= 16;
+                let s_is_small = sub_s.len() <= 16;
 
-            // Zero-Cost Component Separation BFS: starting from {a, b} with `u` and `s` blocked,
-            // every visited node is mathematically guaranteed to lie in C_ab (outside C_s)
-            // for any size of C_s in O(1) time (bounded by <= 72 visited nodes and <= 28 hops).
-            let mut cand_edges: Vec<(usize, usize)> = Vec::with_capacity(96);
-            let mut bfs_vis: HashSet<usize> = HashSet::with_capacity(96);
-            bfs_vis.insert(u);
-            bfs_vis.insert(s);
-            let mut bfs_q: VecDeque<(usize, u8)> = VecDeque::new();
-            bfs_vis.insert(a);
-            bfs_vis.insert(b);
-            bfs_q.push_back((a, 0));
-            bfs_q.push_back((b, 0));
-            while let Some((curr, d_hop)) = bfs_q.pop_front() {
-                if d_hop >= 28 || bfs_vis.len() >= 128 {
-                    continue;
-                }
-                if let Some(cnbs) = adj.get(&curr) {
-                    for &nx in cnbs {
-                        if nx != u && nx != s {
-                            let e = if curr < nx { (curr, nx) } else { (nx, curr) };
-                            cand_edges.push(e);
-                            if bfs_vis.len() < 128 && bfs_vis.insert(nx) {
-                                bfs_q.push_back((nx, d_hop + 1));
+                let mut cand_edges: Vec<(usize, usize)> = Vec::with_capacity(96);
+                let mut bfs_vis: HashSet<usize> = HashSet::with_capacity(96);
+                bfs_vis.insert(u);
+                bfs_vis.insert(s);
+                let mut bfs_q: VecDeque<(usize, u8)> = VecDeque::new();
+                bfs_vis.insert(a);
+                bfs_vis.insert(b);
+                bfs_q.push_back((a, 0));
+                bfs_q.push_back((b, 0));
+                while let Some((curr, d_hop)) = bfs_q.pop_front() {
+                    if d_hop >= 28 || bfs_vis.len() >= 128 {
+                        continue;
+                    }
+                    if let Some(cnbs) = adj_map.get(&curr) {
+                        for &nx in cnbs {
+                            if nx != u && nx != s {
+                                let e = if curr < nx { (curr, nx) } else { (nx, curr) };
+                                cand_edges.push(e);
+                                if bfs_vis.len() < 128 && bfs_vis.insert(nx) {
+                                    bfs_q.push_back((nx, d_hop + 1));
+                                }
                             }
                         }
                     }
                 }
-            }
 
-            if s_is_small {
-                let peers = &mut cand_peers[idx];
-                peers.sort_unstable();
-                peers.dedup();
-                for &p_idx in peers.iter() {
-                    let (ps, pu) = movable[p_idx];
-                    for center in [ps, pu] {
-                        if center != u && !sub_s.contains(&center) {
-                            if let Some(cnbs) = adj.get(&center) {
-                                for &nx in cnbs {
-                                    if nx != u && !sub_s.contains(&nx) {
-                                        let e = if center < nx {
-                                            (center, nx)
-                                        } else {
-                                            (nx, center)
-                                        };
-                                        cand_edges.push(e);
+                let mut watched_nodes: Vec<usize> = bfs_vis.into_iter().collect();
+                watched_nodes.extend(sub_s.iter().copied());
+                if s_is_small {
+                    for &p_idx in &cand_peers[idx] {
+                        let (ps, pu) = movable[p_idx];
+                        for center in [ps, pu] {
+                            if center != u && !sub_s.contains(&center) {
+                                watched_nodes.push(center);
+                                if let Some(cnbs) = adj_map.get(&center) {
+                                    for &nx in cnbs {
+                                        if nx != u && !sub_s.contains(&nx) {
+                                            let e = if center < nx {
+                                                (center, nx)
+                                            } else {
+                                                (nx, center)
+                                            };
+                                            cand_edges.push(e);
+                                        }
                                     }
                                 }
                             }
                         }
                     }
                 }
-            }
-            cand_edges.sort_unstable();
-            cand_edges.dedup();
+                cand_edges.sort_unstable();
+                cand_edges.dedup();
 
-            // Pre-screen candidate edges using zero-allocation bitwise Fitch cost
-            let best_pre_cost = base_cost - min_step;
-            let mut top_cands: Vec<(f64, usize, usize)> = Vec::new();
-            for (x, y) in cand_edges {
-                if let (Some(tx), Some(ty)) = (states.get(&(x, y)), states.get(&(y, x))) {
-                    let c_xy =
-                        Self::fitch_insert_cost_pair(&ts.0, &tx.0, &ty.0, ti_w, tv_w, site_weights);
-                    if c_xy < best_pre_cost {
-                        top_cands.push((c_xy, x, y));
-                    }
-                }
-            }
-            if top_cands.is_empty() {
-                continue;
-            }
-            top_cands.sort_by(|x, y| {
-                x.0.partial_cmp(&y.0)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            });
-            top_cands.truncate(6);
-
-            // Temporarily prune `u` from between `a` and `b` so `T \ s` states are 100% exact
-            adj.get_mut(&a).unwrap().retain(|&z| z != u);
-            adj.get_mut(&b).unwrap().retain(|&z| z != u);
-            adj.get_mut(&a).unwrap().push(b);
-            adj.get_mut(&b).unwrap().push(a);
-            adj.get_mut(&u).unwrap().retain(|&z| z == s);
-
-            states.remove(&(a, u));
-            states.remove(&(u, a));
-            states.remove(&(b, u));
-            states.remove(&(u, b));
-            states.insert((a, b), ta);
-            states.insert((b, a), tb);
-            Self::propagate_directed_fitch_outward(
-                adj,
-                states,
-                VecDeque::from([(a, b, 0), (b, a, 0)]),
-                n,
-            );
-
-            let exact_old_cost = Self::fitch_insert_cost_pair(
-                &ts.0,
-                &states[&(a, b)].0,
-                &states[&(b, a)].0,
-                ti_w,
-                tv_w,
-                site_weights,
-            );
-
-            let eval_edge_mdl_delta =
-                |ex: usize,
-                 ey: usize,
-                 adj_map: &BTreeMap<usize, Vec<usize>>,
-                 st_map: &HashMap<(usize, usize), (Vec<u8>, f64)>|
-                 -> f64 {
-                    let (Some(t_ex), Some(t_ey)) = (st_map.get(&(ex, ey)), st_map.get(&(ey, ex)))
-                    else {
-                        return f64::NEG_INFINITY;
-                    };
-                    let x_ch: Vec<(Vec<u8>, f64)> = if ex >= n {
-                        adj_map[&ex]
-                            .iter()
-                            .copied()
-                            .filter(|&nb| nb != ey)
-                            .filter_map(|nb| st_map.get(&(nb, ex)).cloned())
-                            .collect()
-                    } else {
-                        Vec::new()
-                    };
-                    let y_ch: Vec<(Vec<u8>, f64)> = if ey >= n {
-                        adj_map[&ey]
-                            .iter()
-                            .copied()
-                            .filter(|&nb| nb != ex)
-                            .filter_map(|nb| st_map.get(&(nb, ey)).cloned())
-                            .collect()
-                    } else {
-                        Vec::new()
-                    };
-                    let g_base = if x_ch.len() >= 2 && y_ch.len() >= 2 {
-                        let raw = self
-                            .compute_split_mdl_gain_from_children(
-                                &x_ch,
-                                &y_ch,
-                                l,
-                                l_eff,
-                                ti_cost,
-                                tv_cost,
-                                site_weights,
-                            )
-                            .0;
-                        (raw + split_topology_cost_nats(x_ch.len(), y_ch.len())).max(0.0)
-                    } else {
-                        0.0
-                    };
-                    let g_ux = if x_ch.len() >= 2 {
-                        let raw = self
-                            .compute_split_mdl_gain_from_children(
-                                &[ts.clone(), t_ey.clone()],
-                                &x_ch,
-                                l,
-                                l_eff,
-                                ti_cost,
-                                tv_cost,
-                                site_weights,
-                            )
-                            .0;
-                        (raw + split_topology_cost_nats(2, x_ch.len())).max(0.0)
-                    } else {
-                        0.0
-                    };
-                    let g_uy = if y_ch.len() >= 2 {
-                        let raw = self
-                            .compute_split_mdl_gain_from_children(
-                                &[ts.clone(), t_ex.clone()],
-                                &y_ch,
-                                l,
-                                l_eff,
-                                ti_cost,
-                                tv_cost,
-                                site_weights,
-                            )
-                            .0;
-                        (raw + split_topology_cost_nats(2, y_ch.len())).max(0.0)
-                    } else {
-                        0.0
-                    };
-                    g_ux + g_uy - g_base
-                };
-
-            let old_mdl_delta = eval_edge_mdl_delta(a, b, adj, states);
-            let mut best_edge = (a, b);
-            let mut best_exact_cost = exact_old_cost - min_step;
-            let mut best_mdl_delta = old_mdl_delta + 0.10;
-            for (_, x, y) in top_cands {
-                if adj.get(&x).map(|v| v.contains(&y)).unwrap_or(false) {
-                    if let (Some(tx), Some(ty)) = (states.get(&(x, y)), states.get(&(y, x))) {
+                let best_pre_cost = base_cost - min_step;
+                let mut top_cands: Vec<(f64, usize, usize)> = Vec::new();
+                for &(x, y) in &cand_edges {
+                    if let (Some(tx), Some(ty)) = (st_map.get(&(x, y)), st_map.get(&(y, x))) {
                         let c_xy = Self::fitch_insert_cost_pair(
                             &ts.0,
                             &tx.0,
@@ -3858,45 +4218,330 @@ impl BushwhackerEngine {
                             tv_w,
                             site_weights,
                         );
-                        if c_xy <= exact_old_cost - min_step {
-                            let cand_mdl_delta = eval_edge_mdl_delta(x, y, adj, states);
-                            if cand_mdl_delta > best_mdl_delta
-                                || ((cand_mdl_delta - best_mdl_delta).abs() <= 0.10
-                                    && c_xy < best_exact_cost)
+                        if c_xy < best_pre_cost {
+                            top_cands.push((c_xy, x, y));
+                        }
+                    }
+                }
+                if !top_cands.is_empty() {
+                    top_cands.sort_by(|x, y| {
+                        x.0.partial_cmp(&y.0)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    });
+                    top_cands.truncate(6);
+                }
+                Some((a, b, base_cost, watched_nodes, cand_edges, top_cands))
+            };
+
+        let batch_size = 256usize;
+        let mut any_moved = false;
+
+        for batch_start in (0..m).step_by(batch_size) {
+            let batch_end = (batch_start + batch_size).min(m);
+
+            #[cfg(not(target_arch = "wasm32"))]
+            let use_par_batch = rayon::current_num_threads() > 1 && (batch_end - batch_start) >= 8;
+            #[cfg(not(target_arch = "wasm32"))]
+            let pre_spr: Vec<
+                Option<(
+                    usize,
+                    usize,
+                    f64,
+                    Vec<usize>,
+                    Vec<(usize, usize)>,
+                    Vec<(f64, usize, usize)>,
+                )>,
+            > = if use_par_batch {
+                (batch_start..batch_end)
+                    .into_par_iter()
+                    .map(|idx| eval_spr_prescreen(idx, adj, states))
+                    .collect()
+            } else {
+                Vec::new()
+            };
+
+            #[cfg(target_arch = "wasm32")]
+            let pre_spr: Vec<
+                Option<(
+                    usize,
+                    usize,
+                    f64,
+                    Vec<usize>,
+                    Vec<(usize, usize)>,
+                    Vec<(f64, usize, usize)>,
+                )>,
+            > = Vec::new();
+
+            let mut dirty_spr: HashSet<(usize, usize)> = HashSet::new();
+            let mut dirty_nodes: HashSet<usize> = HashSet::new();
+
+            for idx in batch_start..batch_end {
+                let (s, u) = movable[idx];
+                if adj.get(&u).map(|v| v.len()) != Some(3) || !adj[&u].contains(&s) {
+                    continue;
+                }
+                let u_others: Vec<usize> = adj[&u].iter().copied().filter(|&x| x != s).collect();
+                if u_others.len() != 2 {
+                    continue;
+                }
+                let (a, b) = (u_others[0], u_others[1]);
+                if adj[&a].contains(&b) {
+                    continue;
+                }
+
+                if !states.contains_key(&(s, u))
+                    || !states.contains_key(&(a, u))
+                    || !states.contains_key(&(b, u))
+                {
+                    continue;
+                }
+
+                let top_cands = if !pre_spr.is_empty() {
+                    if let Some((pa, pb, pcost, pwatched, pcands, ptop)) =
+                        &pre_spr[idx - batch_start]
+                    {
+                        let clean_base = (*pa, *pb) == (a, b)
+                            && !dirty_spr.contains(&(s, u))
+                            && !dirty_spr.contains(&(a, u))
+                            && !dirty_spr.contains(&(b, u));
+                        if clean_base && *pcost <= min_step {
+                            continue;
+                        }
+                        let clean_full = clean_base
+                            && (dirty_nodes.is_empty()
+                                || pwatched.iter().all(|nd| !dirty_nodes.contains(nd)))
+                            && (dirty_spr.is_empty()
+                                || pcands.iter().all(|&(x, y)| {
+                                    !dirty_spr.contains(&(x, y)) && !dirty_spr.contains(&(y, x))
+                                }));
+                        if clean_full {
+                            if ptop.is_empty() {
+                                continue;
+                            }
+                            ptop.clone()
+                        } else {
+                            match eval_spr_prescreen(idx, adj, states) {
+                                Some((_, _, bcost, _, _, rtop))
+                                    if bcost > min_step && !rtop.is_empty() =>
+                                {
+                                    rtop
+                                }
+                                _ => continue,
+                            }
+                        }
+                    } else {
+                        match eval_spr_prescreen(idx, adj, states) {
+                            Some((_, _, bcost, _, _, rtop))
+                                if bcost > min_step && !rtop.is_empty() =>
                             {
-                                best_mdl_delta = cand_mdl_delta;
-                                best_exact_cost = c_xy;
-                                best_edge = (x, y);
+                                rtop
+                            }
+                            _ => continue,
+                        }
+                    }
+                } else {
+                    match eval_spr_prescreen(idx, adj, states) {
+                        Some((_, _, bcost, _, _, rtop)) if bcost > min_step && !rtop.is_empty() => {
+                            rtop
+                        }
+                        _ => continue,
+                    }
+                };
+
+                let ts = states[&(s, u)].clone();
+                let ta = states.remove(&(a, u)).unwrap();
+                let tb = states.remove(&(b, u)).unwrap();
+                states.remove(&(u, a));
+                states.remove(&(u, b));
+
+                // Temporarily prune `u` from between `a` and `b` so `T \ s` states are 100% exact
+                adj.get_mut(&a).unwrap().retain(|&z| z != u);
+                adj.get_mut(&b).unwrap().retain(|&z| z != u);
+                adj.get_mut(&a).unwrap().push(b);
+                adj.get_mut(&b).unwrap().push(a);
+                adj.get_mut(&u).unwrap().retain(|&z| z == s);
+
+                states.insert((a, b), ta);
+                states.insert((b, a), tb);
+                dirty_spr.insert((a, b));
+                dirty_spr.insert((b, a));
+                Self::propagate_directed_fitch_outward(
+                    adj,
+                    states,
+                    VecDeque::from([(a, b, 0), (b, a, 0)]),
+                    n,
+                    Some(&mut dirty_spr),
+                );
+
+                let exact_old_cost = Self::fitch_insert_cost_pair(
+                    &ts.0,
+                    &states[&(a, b)].0,
+                    &states[&(b, a)].0,
+                    ti_w,
+                    tv_w,
+                    site_weights,
+                );
+
+                let eval_edge_mdl_delta =
+                    |ex: usize,
+                     ey: usize,
+                     adj_map: &BTreeMap<usize, Vec<usize>>,
+                     st_map: &HashMap<(usize, usize), (Vec<u8>, f64)>|
+                     -> f64 {
+                        let (Some(t_ex), Some(t_ey)) =
+                            (st_map.get(&(ex, ey)), st_map.get(&(ey, ex)))
+                        else {
+                            return f64::NEG_INFINITY;
+                        };
+                        let x_ch: Vec<(&[u8], f64)> = if ex >= n {
+                            adj_map[&ex]
+                                .iter()
+                                .copied()
+                                .filter(|&nb| nb != ey)
+                                .filter_map(|nb| {
+                                    st_map.get(&(nb, ex)).map(|st| (st.0.as_slice(), st.1))
+                                })
+                                .collect()
+                        } else {
+                            Vec::new()
+                        };
+                        let y_ch: Vec<(&[u8], f64)> = if ey >= n {
+                            adj_map[&ey]
+                                .iter()
+                                .copied()
+                                .filter(|&nb| nb != ex)
+                                .filter_map(|nb| {
+                                    st_map.get(&(nb, ey)).map(|st| (st.0.as_slice(), st.1))
+                                })
+                                .collect()
+                        } else {
+                            Vec::new()
+                        };
+                        let g_base = if x_ch.len() >= 2 && y_ch.len() >= 2 {
+                            let raw = self
+                                .compute_split_mdl_gain_from_child_refs(
+                                    &x_ch,
+                                    &y_ch,
+                                    l,
+                                    l_eff,
+                                    ti_cost,
+                                    tv_cost,
+                                    site_weights,
+                                )
+                                .0;
+                            (raw + split_topology_cost_nats(x_ch.len(), y_ch.len())).max(0.0)
+                        } else {
+                            0.0
+                        };
+                        let g_ux = if x_ch.len() >= 2 {
+                            let raw = self
+                                .compute_split_mdl_gain_from_child_refs(
+                                    &[(ts.0.as_slice(), ts.1), (t_ey.0.as_slice(), t_ey.1)],
+                                    &x_ch,
+                                    l,
+                                    l_eff,
+                                    ti_cost,
+                                    tv_cost,
+                                    site_weights,
+                                )
+                                .0;
+                            (raw + split_topology_cost_nats(2, x_ch.len())).max(0.0)
+                        } else {
+                            0.0
+                        };
+                        let g_uy = if y_ch.len() >= 2 {
+                            let raw = self
+                                .compute_split_mdl_gain_from_child_refs(
+                                    &[(ts.0.as_slice(), ts.1), (t_ex.0.as_slice(), t_ex.1)],
+                                    &y_ch,
+                                    l,
+                                    l_eff,
+                                    ti_cost,
+                                    tv_cost,
+                                    site_weights,
+                                )
+                                .0;
+                            (raw + split_topology_cost_nats(2, y_ch.len())).max(0.0)
+                        } else {
+                            0.0
+                        };
+                        g_ux + g_uy - g_base
+                    };
+
+                let old_mdl_delta = eval_edge_mdl_delta(a, b, adj, states);
+                let mut best_edge = (a, b);
+                let mut best_exact_cost = exact_old_cost - min_step;
+                let mut best_mdl_delta = old_mdl_delta + 0.10;
+                for (_, x, y) in top_cands {
+                    if adj.get(&x).map(|v| v.contains(&y)).unwrap_or(false) {
+                        if let (Some(tx), Some(ty)) = (states.get(&(x, y)), states.get(&(y, x))) {
+                            let c_xy = Self::fitch_insert_cost_pair(
+                                &ts.0,
+                                &tx.0,
+                                &ty.0,
+                                ti_w,
+                                tv_w,
+                                site_weights,
+                            );
+                            if c_xy <= exact_old_cost - min_step {
+                                let cand_mdl_delta = eval_edge_mdl_delta(x, y, adj, states);
+                                if cand_mdl_delta > best_mdl_delta
+                                    || ((cand_mdl_delta - best_mdl_delta).abs() <= 0.10
+                                        && c_xy < best_exact_cost)
+                                {
+                                    best_mdl_delta = cand_mdl_delta;
+                                    best_exact_cost = c_xy;
+                                    best_edge = (x, y);
+                                }
                             }
                         }
                     }
                 }
-            }
 
-            let (rx, ry) = best_edge;
-            // Insert `u` onto `(rx, ry)` (either the improved target edge or restoring `(a, b)`)
-            let tx = states.remove(&(rx, ry)).unwrap();
-            let ty = states.remove(&(ry, rx)).unwrap();
-            adj.get_mut(&rx).unwrap().retain(|&z| z != ry);
-            adj.get_mut(&ry).unwrap().retain(|&z| z != rx);
-            adj.get_mut(&rx).unwrap().push(u);
-            adj.get_mut(&ry).unwrap().push(u);
-            adj.get_mut(&u).unwrap().extend([rx, ry]);
+                let (rx, ry) = best_edge;
+                // Insert `u` onto `(rx, ry)` (either the improved target edge or restoring `(a, b)`)
+                let tx = states.remove(&(rx, ry)).unwrap();
+                let ty = states.remove(&(ry, rx)).unwrap();
+                adj.get_mut(&rx).unwrap().retain(|&z| z != ry);
+                adj.get_mut(&ry).unwrap().retain(|&z| z != rx);
+                adj.get_mut(&rx).unwrap().push(u);
+                adj.get_mut(&ry).unwrap().push(u);
+                adj.get_mut(&u).unwrap().extend([rx, ry]);
 
-            states.insert((rx, u), tx.clone());
-            states.insert((ry, u), ty.clone());
-            states.insert((u, rx), Self::combine_fitch_children(&[ts.clone(), ty.clone()]));
-            states.insert((u, ry), Self::combine_fitch_children(&[ts.clone(), tx.clone()]));
-            states.insert((u, s), Self::combine_fitch_children(&[tx, ty]));
-            Self::propagate_directed_fitch_outward(
-                adj,
-                states,
-                VecDeque::from([(u, rx, 0), (u, ry, 0), (u, s, 0)]),
-                n,
-            );
+                let st_urx = Self::combine_fitch_children_refs(&[
+                    (ts.0.as_slice(), ts.1),
+                    (ty.0.as_slice(), ty.1),
+                ]);
+                let st_ury = Self::combine_fitch_children_refs(&[
+                    (ts.0.as_slice(), ts.1),
+                    (tx.0.as_slice(), tx.1),
+                ]);
+                let st_us = Self::combine_fitch_children_refs(&[
+                    (tx.0.as_slice(), tx.1),
+                    (ty.0.as_slice(), ty.1),
+                ]);
+                states.insert((rx, u), tx);
+                states.insert((ry, u), ty);
+                states.insert((u, rx), st_urx);
+                states.insert((u, ry), st_ury);
+                states.insert((u, s), st_us);
+                dirty_spr.insert((rx, u));
+                dirty_spr.insert((ry, u));
+                dirty_spr.insert((u, rx));
+                dirty_spr.insert((u, ry));
+                dirty_spr.insert((u, s));
+                Self::propagate_directed_fitch_outward(
+                    adj,
+                    states,
+                    VecDeque::from([(u, rx, 0), (u, ry, 0), (u, s, 0)]),
+                    n,
+                    Some(&mut dirty_spr),
+                );
 
-            if best_edge != (a, b) {
-                any_moved = true;
+                if best_edge != (a, b) {
+                    dirty_nodes.extend([a, b, rx, ry, u, s]);
+                    any_moved = true;
+                }
             }
         }
         any_moved
@@ -3920,146 +4565,199 @@ impl BushwhackerEngine {
 
         let mut parent: HashMap<usize, Option<usize>> = HashMap::new();
         parent.insert(root, None);
-        let mut order = vec![root];
-        let mut q = VecDeque::new();
-        q.push_back(root);
+        let mut levels: Vec<Vec<usize>> = vec![vec![root]];
+        let mut total_nodes = 1usize;
 
-        while let Some(curr) = q.pop_front() {
-            if let Some(nbs) = adj.get(&curr) {
-                for &nb in nbs {
-                    if !parent.contains_key(&nb) {
-                        parent.insert(nb, Some(curr));
-                        order.push(nb);
-                        q.push_back(nb);
+        loop {
+            let mut next_level = Vec::new();
+            for &curr in levels.last().unwrap() {
+                if let Some(nbs) = adj.get(&curr) {
+                    for &nb in nbs {
+                        if !parent.contains_key(&nb) {
+                            parent.insert(nb, Some(curr));
+                            next_level.push(nb);
+                        }
                     }
                 }
             }
+            if next_level.is_empty() {
+                break;
+            }
+            total_nodes += next_level.len();
+            levels.push(next_level);
         }
 
         let mut states: HashMap<(usize, usize), (Vec<u8>, f64)> =
-            HashMap::with_capacity(order.len() * 2);
+            HashMap::with_capacity(total_nodes * 2);
 
-        // Bottom-up pass
-        for &u in order.iter().rev() {
-            let Some(Some(p)) = parent.get(&u) else {
-                continue;
-            };
-            let p = *p;
-            if u < n {
-                states.insert(
-                    (u, p),
-                    (bitmasks[u * l..(u + 1) * l].to_vec(), terminal_loads[u]),
-                );
-            } else {
-                let children: Vec<(Vec<u8>, f64)> = adj[&u]
-                    .iter()
-                    .copied()
-                    .filter(|&nb| nb != p)
-                    .map(|c| states[&(c, u)].clone())
-                    .collect();
-                states.insert((u, p), Self::combine_fitch_children(&children));
-            }
-        }
-
-        // Top-down pass (with O(d * L) leave-one-out hub acceleration for degree d >= 4)
-        for &u in &order {
-            let p_opt = parent[&u];
-            let children: Vec<usize> = adj[&u]
-                .iter()
-                .copied()
-                .filter(|&nb| Some(nb) != p_opt)
-                .collect();
-            if u < n {
-                for c in children {
-                    states.insert(
-                        (u, c),
+        // Level-parallel bottom-up pass (depth d only reads depth d + 1)
+        for d in (1..levels.len()).rev() {
+            let level = &levels[d];
+            let compute_up = |&u: &usize| -> ((usize, usize), (Vec<u8>, f64)) {
+                let p = parent[&u].unwrap();
+                if u < n {
+                    (
+                        (u, p),
                         (bitmasks[u * l..(u + 1) * l].to_vec(), terminal_loads[u]),
-                    );
-                }
-            } else if adj[&u].len() >= 4 {
-                let all_nbs = &adj[&u];
-                let mut tot_inv = 0.0_f64;
-                let mut tot_counts = vec![[0_u16; 4]; l];
-                for &nb in all_nbs {
-                    let (ref s_mask, m_c) = states[&(nb, u)];
-                    tot_inv += 1.0 / m_c.max(0.4);
-                    for s in 0..l {
-                        let m = s_mask[s];
-                        if m != 15 {
-                            tot_counts[s][0] += (m & 1) as u16;
-                            tot_counts[s][1] += ((m >> 1) & 1) as u16;
-                            tot_counts[s][2] += ((m >> 2) & 1) as u16;
-                            tot_counts[s][3] += ((m >> 3) & 1) as u16;
-                        }
-                    }
-                }
-                for c in children {
-                    let (s_c, m_c) = states[&(c, u)].clone();
-                    let inv_rem = (tot_inv - 1.0 / m_c.max(0.4)).max(1e-6);
-                    let par_load = (1.0 / inv_rem).max(0.4);
-                    let mut out_mask = vec![15_u8; l];
-                    for s in 0..l {
-                        let mc = s_c[s];
-                        let mut c0 = tot_counts[s][0];
-                        let mut c1 = tot_counts[s][1];
-                        let mut c2 = tot_counts[s][2];
-                        let mut c3 = tot_counts[s][3];
-                        if mc != 15 {
-                            c0 -= (mc & 1) as u16;
-                            c1 -= ((mc >> 1) & 1) as u16;
-                            c2 -= ((mc >> 2) & 1) as u16;
-                            c3 -= ((mc >> 3) & 1) as u16;
-                        }
-                        let max_c = c0.max(c1).max(c2.max(c3));
-                        if max_c > 0 {
-                            let mut mask = 0_u8;
-                            if c0 == max_c {
-                                mask |= 1;
-                            }
-                            if c1 == max_c {
-                                mask |= 2;
-                            }
-                            if c2 == max_c {
-                                mask |= 4;
-                            }
-                            if c3 == max_c {
-                                mask |= 8;
-                            }
-                            out_mask[s] = mask;
-                        }
-                    }
-                    states.insert((u, c), (out_mask, par_load));
-                }
-            } else {
-                for c in children {
-                    let other_nbs: Vec<(Vec<u8>, f64)> = adj[&u]
+                    )
+                } else {
+                    let child_refs: Vec<(&[u8], f64)> = adj[&u]
                         .iter()
                         .copied()
-                        .filter(|&nb| nb != c)
-                        .map(|nb| states[&(nb, u)].clone())
+                        .filter(|&nb| nb != p)
+                        .map(|c| {
+                            let st = &states[&(c, u)];
+                            (st.0.as_slice(), st.1)
+                        })
                         .collect();
-                    if other_nbs.is_empty() {
-                        states.insert((u, c), (vec![15_u8; l], 1.0));
-                    } else {
-                        states.insert((u, c), Self::combine_fitch_children(&other_nbs));
-                    }
+                    ((u, p), Self::combine_fitch_children_refs(&child_refs))
                 }
+            };
+
+            #[cfg(not(target_arch = "wasm32"))]
+            let up_batch: Vec<((usize, usize), (Vec<u8>, f64))> = if level.len() >= 8 {
+                level.par_iter().map(compute_up).collect()
+            } else {
+                level.iter().map(compute_up).collect()
+            };
+
+            #[cfg(target_arch = "wasm32")]
+            let up_batch: Vec<((usize, usize), (Vec<u8>, f64))> =
+                level.iter().map(compute_up).collect();
+
+            states.extend(up_batch);
+        }
+
+        // Level-parallel top-down pass (with O(d * L) leave-one-out hub acceleration for degree >= 4)
+        for level in &levels {
+            let compute_down = |&u: &usize| -> Vec<((usize, usize), (Vec<u8>, f64))> {
+                let p_opt = parent[&u];
+                let children: Vec<usize> = adj[&u]
+                    .iter()
+                    .copied()
+                    .filter(|&nb| Some(nb) != p_opt)
+                    .collect();
+                if children.is_empty() {
+                    return Vec::new();
+                }
+                if u < n {
+                    let leaf_slice = &bitmasks[u * l..(u + 1) * l];
+                    let tl = terminal_loads[u];
+                    children
+                        .into_iter()
+                        .map(|c| ((u, c), (leaf_slice.to_vec(), tl)))
+                        .collect()
+                } else if adj[&u].len() >= 4 {
+                    let all_nbs = &adj[&u];
+                    let mut tot_inv = 0.0_f64;
+                    let mut tot_counts = vec![[0_u16; 4]; l];
+                    for &nb in all_nbs {
+                        let (ref s_mask, m_c) = states[&(nb, u)];
+                        tot_inv += 1.0 / m_c.max(0.4);
+                        for s in 0..l {
+                            let m = s_mask[s];
+                            if m != 15 {
+                                tot_counts[s][0] += (m & 1) as u16;
+                                tot_counts[s][1] += ((m >> 1) & 1) as u16;
+                                tot_counts[s][2] += ((m >> 2) & 1) as u16;
+                                tot_counts[s][3] += ((m >> 3) & 1) as u16;
+                            }
+                        }
+                    }
+                    let build_hub_child = |&c: &usize| -> ((usize, usize), (Vec<u8>, f64)) {
+                        let (ref s_c, m_c) = states[&(c, u)];
+                        let inv_rem = (tot_inv - 1.0 / m_c.max(0.4)).max(1e-6);
+                        let par_load = (1.0 / inv_rem).max(0.4);
+                        let mut out_mask = vec![15_u8; l];
+                        for s in 0..l {
+                            let mc = s_c[s];
+                            let mut c0 = tot_counts[s][0];
+                            let mut c1 = tot_counts[s][1];
+                            let mut c2 = tot_counts[s][2];
+                            let mut c3 = tot_counts[s][3];
+                            if mc != 15 {
+                                c0 -= (mc & 1) as u16;
+                                c1 -= ((mc >> 1) & 1) as u16;
+                                c2 -= ((mc >> 2) & 1) as u16;
+                                c3 -= ((mc >> 3) & 1) as u16;
+                            }
+                            let max_c = c0.max(c1).max(c2.max(c3));
+                            if max_c > 0 {
+                                let mut mask = 0_u8;
+                                if c0 == max_c {
+                                    mask |= 1;
+                                }
+                                if c1 == max_c {
+                                    mask |= 2;
+                                }
+                                if c2 == max_c {
+                                    mask |= 4;
+                                }
+                                if c3 == max_c {
+                                    mask |= 8;
+                                }
+                                out_mask[s] = mask;
+                            }
+                        }
+                        ((u, c), (out_mask, par_load))
+                    };
+                    #[cfg(not(target_arch = "wasm32"))]
+                    if children.len() >= 16 {
+                        return children.par_iter().map(build_hub_child).collect();
+                    }
+                    children.iter().map(build_hub_child).collect()
+                } else {
+                    children
+                        .into_iter()
+                        .map(|c| {
+                            let other_refs: Vec<(&[u8], f64)> = adj[&u]
+                                .iter()
+                                .copied()
+                                .filter(|&nb| nb != c)
+                                .map(|nb| {
+                                    let st = &states[&(nb, u)];
+                                    (st.0.as_slice(), st.1)
+                                })
+                                .collect();
+                            if other_refs.is_empty() {
+                                ((u, c), (vec![15_u8; l], 1.0))
+                            } else {
+                                ((u, c), Self::combine_fitch_children_refs(&other_refs))
+                            }
+                        })
+                        .collect()
+                }
+            };
+
+            #[cfg(not(target_arch = "wasm32"))]
+            let down_batches: Vec<Vec<((usize, usize), (Vec<u8>, f64))>> = if level.len() >= 4 {
+                level.par_iter().map(compute_down).collect()
+            } else {
+                level.iter().map(compute_down).collect()
+            };
+
+            #[cfg(target_arch = "wasm32")]
+            let down_batches: Vec<Vec<((usize, usize), (Vec<u8>, f64))>> =
+                level.iter().map(compute_down).collect();
+
+            for batch in down_batches {
+                states.extend(batch);
             }
         }
 
         states
     }
 
-    /// 64-bit SWAR SIMD Fitch combination processing 8 sites per u64 word.
+    /// 64-bit SWAR SIMD Fitch combination processing 8 sites per u64 word (zero-clone slice API).
     #[inline]
-    pub fn combine_fitch_children(child_list: &[(Vec<u8>, f64)]) -> (Vec<u8>, f64) {
+    pub fn combine_fitch_children_refs(child_list: &[(&[u8], f64)]) -> (Vec<u8>, f64) {
         if child_list.len() == 1 {
-            return child_list[0].clone();
+            return (child_list[0].0.to_vec(), child_list[0].1);
         }
         let l = child_list[0].0.len();
         if child_list.len() == 2 {
-            let (s1, m1) = &child_list[0];
-            let (s2, m2) = &child_list[1];
+            let (s1, m1) = child_list[0];
+            let (s2, m2) = child_list[1];
             let mut out = vec![0_u8; l];
             let mut n_mut = 0usize;
             let chunks = l / 8;
@@ -4098,14 +4796,14 @@ impl BushwhackerEngine {
 
         let mut out = vec![15_u8; l];
         let mut inv_sum = 0.0_f64;
-        for (_, m_c) in child_list {
+        for &(_, m_c) in child_list {
             inv_sum += 1.0 / m_c.max(0.4);
         }
         let chunks = l / 8;
         for c in 0..chunks {
             let off = c * 8;
             let mut w_and = !0_u64;
-            for (s_mask, _) in child_list {
+            for &(s_mask, _) in child_list {
                 let w = u64::from_ne_bytes(s_mask[off..off + 8].try_into().unwrap());
                 w_and &= w;
             }
@@ -4115,7 +4813,7 @@ impl BushwhackerEngine {
             } else {
                 for s in off..(off + 8) {
                     let mut counts = [0_u16; 4];
-                    for (s_mask, _) in child_list {
+                    for &(s_mask, _) in child_list {
                         let m = s_mask[s];
                         if m != 15 {
                             counts[0] += (m & 1) as u16;
@@ -4139,7 +4837,7 @@ impl BushwhackerEngine {
         }
         for s in (chunks * 8)..l {
             let mut counts = [0_u16; 4];
-            for (s_mask, _) in child_list {
+            for &(s_mask, _) in child_list {
                 let m = s_mask[s];
                 if m != 15 {
                     counts[0] += (m & 1) as u16;
@@ -4161,6 +4859,24 @@ impl BushwhackerEngine {
         }
         let par_load = (1.0 / inv_sum.max(1e-6)).max(0.4);
         (out, par_load)
+    }
+
+    #[inline]
+    pub fn combine_fitch_children(child_list: &[(Vec<u8>, f64)]) -> (Vec<u8>, f64) {
+        if child_list.len() == 1 {
+            return child_list[0].clone();
+        }
+        if child_list.len() == 2 {
+            return Self::combine_fitch_children_refs(&[
+                (child_list[0].0.as_slice(), child_list[0].1),
+                (child_list[1].0.as_slice(), child_list[1].1),
+            ]);
+        }
+        let refs: Vec<(&[u8], f64)> = child_list
+            .iter()
+            .map(|(s, m)| (s.as_slice(), *m))
+            .collect();
+        Self::combine_fitch_children_refs(&refs)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -4192,130 +4908,140 @@ impl BushwhackerEngine {
             };
             if nbs_ref.len() < 4 {
                 continue;
-            }
+            };
             let nbs = nbs_ref.clone();
             let d = nbs.len();
-            let nb_states: Vec<(Vec<u8>, f64)> =
-                nbs.iter().map(|&c| states[&(c, h)].clone()).collect();
 
-            let mut seed_weights: HashMap<Vec<usize>, f64> = HashMap::new();
-            for s in 0..l {
-                let mut n_val = 0usize;
-                for st in &nb_states {
-                    if st.0[s] != 15 {
-                        n_val += 1;
-                    }
-                }
-                if n_val < 4 {
-                    continue;
-                }
-                for b in 0..4_u8 {
-                    let mut idx_vec: Vec<usize> = (0..d)
-                        .filter(|&i| {
-                            let m = nb_states[i].0[s];
-                            m != 15 && ((m >> b) & 1) != 0
-                        })
-                        .collect();
-                    let cnt = idx_vec.len();
-                    if cnt >= 2 && cnt <= d - 2 {
-                        if cnt > d / 2 || (cnt == d / 2 && !idx_vec.contains(&0)) {
-                            idx_vec = (0..d).filter(|i| !idx_vec.contains(i)).collect();
-                        }
-                        if idx_vec.len() >= 2 && idx_vec.len() <= d - 2 {
-                            *seed_weights.entry(idx_vec).or_insert(0.0) += site_weights[s];
-                        }
-                    }
-                }
-            }
-
-            if seed_weights.is_empty() {
-                continue;
-            }
-
-            let mut top_seeds: Vec<(Vec<usize>, f64)> = seed_weights.into_iter().collect();
-            top_seeds.sort_by(|a, b| {
-                b.1.partial_cmp(&a.1)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-                    .then_with(|| a.0.cmp(&b.0))
-            });
-            top_seeds.truncate(25);
-
-            let mut positive_attractors: Vec<(f64, BTreeSet<usize>)> = Vec::new();
-            let mut seen_sets: HashSet<BTreeSet<usize>> = HashSet::new();
-
-            for (idx_vec, _) in top_seeds {
-                let mut u_set: BTreeSet<usize> = idx_vec.into_iter().collect();
-                let u_ch: Vec<(Vec<u8>, f64)> =
-                    u_set.iter().map(|&i| nb_states[i].clone()).collect();
-                let v_ch: Vec<(Vec<u8>, f64)> = (0..d)
-                    .filter(|j| !u_set.contains(j))
-                    .map(|j| nb_states[j].clone())
+            let chosen_splits: Vec<BTreeSet<usize>> = {
+                let nb_refs: Vec<(&[u8], f64)> = nbs
+                    .iter()
+                    .map(|&c| {
+                        let st = &states[&(c, h)];
+                        (st.0.as_slice(), st.1)
+                    })
                     .collect();
-                let (mut g_cur, _, sites_cur) = self.compute_split_mdl_gain_from_children(
-                    &u_ch,
-                    &v_ch,
-                    l,
-                    l_eff,
-                    ti_cost,
-                    tv_cost,
-                    site_weights,
-                );
-                if !sites_cur.is_empty() && d <= 20 {
-                    for k_try in 0..d {
-                        let mut cand_set = u_set.clone();
-                        if !cand_set.remove(&k_try) {
-                            cand_set.insert(k_try);
+
+                let mut seed_weights: HashMap<Vec<usize>, f64> = HashMap::new();
+                for s in 0..l {
+                    let mut n_val = 0usize;
+                    for &(s_mask, _) in &nb_refs {
+                        if s_mask[s] != 15 {
+                            n_val += 1;
                         }
-                        if cand_set.len() < 2 || cand_set.len() > d - 2 {
-                            continue;
-                        }
-                        let u_try: Vec<(Vec<u8>, f64)> =
-                            cand_set.iter().map(|&i| nb_states[i].clone()).collect();
-                        let v_try: Vec<(Vec<u8>, f64)> = (0..d)
-                            .filter(|j| !cand_set.contains(j))
-                            .map(|j| nb_states[j].clone())
+                    }
+                    if n_val < 4 {
+                        continue;
+                    }
+                    for b in 0..4_u8 {
+                        let mut idx_vec: Vec<usize> = (0..d)
+                            .filter(|&i| {
+                                let m = nb_refs[i].0[s];
+                                m != 15 && ((m >> b) & 1) != 0
+                            })
                             .collect();
-                        let (g_try, _, _) = self.compute_split_mdl_gain_from_children(
-                            &u_try,
-                            &v_try,
+                        let cnt = idx_vec.len();
+                        if cnt >= 2 && cnt <= d - 2 {
+                            if cnt > d / 2 || (cnt == d / 2 && !idx_vec.contains(&0)) {
+                                idx_vec = (0..d).filter(|i| !idx_vec.contains(i)).collect();
+                            }
+                            if idx_vec.len() >= 2 && idx_vec.len() <= d - 2 {
+                                *seed_weights.entry(idx_vec).or_insert(0.0) += site_weights[s];
+                            }
+                        }
+                    }
+                }
+
+                if seed_weights.is_empty() {
+                    Vec::new()
+                } else {
+                    let mut top_seeds: Vec<(Vec<usize>, f64)> = seed_weights.into_iter().collect();
+                    top_seeds.sort_by(|a, b| {
+                        b.1.partial_cmp(&a.1)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                            .then_with(|| a.0.cmp(&b.0))
+                    });
+                    top_seeds.truncate(25);
+
+                    let mut positive_attractors: Vec<(f64, BTreeSet<usize>)> = Vec::new();
+                    let mut seen_sets: HashSet<BTreeSet<usize>> = HashSet::new();
+
+                    for (idx_vec, _) in top_seeds {
+                        let mut u_set: BTreeSet<usize> = idx_vec.into_iter().collect();
+                        let u_ch: Vec<(&[u8], f64)> =
+                            u_set.iter().map(|&i| nb_refs[i]).collect();
+                        let v_ch: Vec<(&[u8], f64)> = (0..d)
+                            .filter(|j| !u_set.contains(j))
+                            .map(|j| nb_refs[j])
+                            .collect();
+                        let (mut g_cur, _, sites_cur) = self.compute_split_mdl_gain_from_child_refs(
+                            &u_ch,
+                            &v_ch,
                             l,
                             l_eff,
                             ti_cost,
                             tv_cost,
                             site_weights,
                         );
-                        if g_try > g_cur + 0.25 {
-                            u_set = cand_set;
-                            g_cur = g_try;
+                        if !sites_cur.is_empty() && d <= 20 {
+                            for k_try in 0..d {
+                                let mut cand_set = u_set.clone();
+                                if !cand_set.remove(&k_try) {
+                                    cand_set.insert(k_try);
+                                }
+                                if cand_set.len() < 2 || cand_set.len() > d - 2 {
+                                    continue;
+                                }
+                                let u_try: Vec<(&[u8], f64)> =
+                                    cand_set.iter().map(|&i| nb_refs[i]).collect();
+                                let v_try: Vec<(&[u8], f64)> = (0..d)
+                                    .filter(|j| !cand_set.contains(j))
+                                    .map(|j| nb_refs[j])
+                                    .collect();
+                                let (g_try, _, _) = self.compute_split_mdl_gain_from_child_refs(
+                                    &u_try,
+                                    &v_try,
+                                    l,
+                                    l_eff,
+                                    ti_cost,
+                                    tv_cost,
+                                    site_weights,
+                                );
+                                if g_try > g_cur + 0.25 {
+                                    u_set = cand_set;
+                                    g_cur = g_try;
+                                }
+                            }
+                        }
+                        if g_cur > 0.0 && seen_sets.insert(u_set.clone()) {
+                            positive_attractors.push((g_cur, u_set));
                         }
                     }
-                }
-                if g_cur > 0.0 && seen_sets.insert(u_set.clone()) {
-                    positive_attractors.push((g_cur, u_set));
-                }
-            }
 
-            if positive_attractors.is_empty() {
+                    positive_attractors
+                        .sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+                    let mut c_splits: Vec<BTreeSet<usize>> = Vec::new();
+                    let mut used_indices: BTreeSet<usize> = BTreeSet::new();
+                    for (_, u_set) in positive_attractors {
+                        if u_set.is_disjoint(&used_indices)
+                            && (d - used_indices.len() - u_set.len()) >= 2
+                        {
+                            used_indices.extend(&u_set);
+                            c_splits.push(u_set);
+                        }
+                    }
+                    c_splits
+                }
+            };
+
+            if chosen_splits.is_empty() {
                 continue;
             }
 
-            positive_attractors
-                .sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-            let mut chosen_splits: Vec<BTreeSet<usize>> = Vec::new();
-            let mut used_indices: BTreeSet<usize> = BTreeSet::new();
-            for (_, u_set) in positive_attractors {
-                if u_set.is_disjoint(&used_indices)
-                    && (d - used_indices.len() - u_set.len()) >= 2
-                {
-                    used_indices.extend(&u_set);
-                    chosen_splits.push(u_set);
-                }
-            }
-
-            let had_splits = !chosen_splits.is_empty();
+            let mut new_nodes_created: Vec<usize> = Vec::with_capacity(chosen_splits.len());
             for u_set in chosen_splits {
                 let new_node = next_id;
                 next_id += 1;
+                new_nodes_created.push(new_node);
                 adj.insert(new_node, vec![h]);
                 node_labels.insert(new_node, format!("N{new_node}"));
                 adj.get_mut(&h).unwrap().push(new_node);
@@ -4326,20 +5052,30 @@ impl BushwhackerEngine {
                         adj.get_mut(&c_node).unwrap().retain(|&x| x != h);
                         adj.get_mut(&new_node).unwrap().push(c_node);
                         adj.get_mut(&c_node).unwrap().push(new_node);
+                        if let Some(st_ch) = states.remove(&(c_node, h)) {
+                            states.insert((c_node, new_node), st_ch);
+                        }
+                        states.remove(&(h, c_node));
                     }
                 }
+                let ch_refs: Vec<(&[u8], f64)> = adj[&new_node]
+                    .iter()
+                    .copied()
+                    .filter(|&x| x != h)
+                    .map(|c_node| {
+                        let st = &states[&(c_node, new_node)];
+                        (st.0.as_slice(), st.1)
+                    })
+                    .collect();
+                let st_new_h = Self::combine_fitch_children_refs(&ch_refs);
+                states.insert((new_node, h), st_new_h);
             }
 
-            if had_splits {
-                states = self.compute_all_directed_fitch_states(
-                    adj,
-                    bitmasks,
-                    n,
-                    l,
-                    terminal_loads,
-                    l_eff,
-                );
+            let mut prop_q: VecDeque<(usize, usize)> = VecDeque::new();
+            for &nb in &adj[&h] {
+                prop_q.push_back((h, nb));
             }
+            Self::propagate_directed_fitch_outward_exact(adj, &mut states, prop_q, n);
         }
     }
 
@@ -4349,9 +5085,8 @@ impl BushwhackerEngine {
     /// By Buneman's Split Compatibility Theorem, any split from `pre_step3_adj` refines a polytomy
     /// hub `h` of degree `d >= 4` in `adj_mdl` without conflicting with any certified split of
     /// `adj_mdl` if and only if its leaf set is a union of `k` (`2 <= k <= d - 2`) neighbor
-    /// component leaf-sets of `h`. Any remaining degree >= 4 hub (where `expand_polytomy_hubs_mdl`
-    /// introduced a new positive-MDL split crossing `pre_step3_adj`) is resolved via ancestral
-    /// Fitch-state quartet MDL / Neighbor-Joining.
+    /// component leaf-sets of `h`. Distinct polytomy hubs are topologically independent and
+    /// resolved in parallel across threads, with deterministic node-ID assignment.
     #[allow(clippy::too_many_arguments)]
     fn build_binary_refinement_from_mdl(
         &self,
@@ -4366,37 +5101,94 @@ impl BushwhackerEngine {
         tv_cost: f64,
         site_weights: &[f64],
     ) -> BTreeMap<usize, Vec<usize>> {
-        if n <= 3 || !adj_mdl.iter().any(|(&u, nbs)| u >= n && nbs.len() >= 4) {
+        let hubs: Vec<usize> = adj_mdl
+            .iter()
+            .filter(|(&u, nbs)| u >= n && nbs.len() >= 4)
+            .map(|(&u, _)| u)
+            .collect();
+        if n <= 3 || hubs.is_empty() {
             return adj_mdl.clone();
         }
         let n_words = (n + 63) / 64;
-        let collect_leaf_bits =
-            |start: usize, blocked: usize, graph: &BTreeMap<usize, Vec<usize>>| -> Vec<u64> {
-                let mut bits = vec![0_u64; n_words];
-                let mut stack = vec![start];
-                let mut vis = HashSet::new();
-                vis.insert(blocked);
-                vis.insert(start);
-                while let Some(curr) = stack.pop() {
-                    if curr < n {
-                        bits[curr >> 6] |= 1_u64 << (curr & 63);
-                    } else if let Some(nbs) = graph.get(&curr) {
-                        for &nx in nbs {
-                            if vis.insert(nx) {
-                                stack.push(nx);
+
+        let compute_sub_bits =
+            |graph: &BTreeMap<usize, Vec<usize>>| -> (
+                HashMap<usize, Option<usize>>,
+                HashMap<usize, Vec<u64>>,
+                Vec<u64>,
+            ) {
+                let root = graph
+                    .iter()
+                    .find(|(&u, nbs)| u >= n && !nbs.is_empty())
+                    .or_else(|| graph.iter().find(|(_, nbs)| !nbs.is_empty()))
+                    .map(|(&u, _)| u)
+                    .unwrap_or(0);
+                let mut parent: HashMap<usize, Option<usize>> = HashMap::new();
+                parent.insert(root, None);
+                let mut order = vec![root];
+                let mut q_idx = 0usize;
+                while q_idx < order.len() {
+                    let curr = order[q_idx];
+                    q_idx += 1;
+                    if let Some(nbs) = graph.get(&curr) {
+                        for &nb in nbs {
+                            if !parent.contains_key(&nb) {
+                                parent.insert(nb, Some(curr));
+                                order.push(nb);
                             }
                         }
                     }
                 }
-                bits
+                let mut sub_bits: HashMap<usize, Vec<u64>> = HashMap::with_capacity(order.len());
+                for &u in order.iter().rev() {
+                    let mut bits = vec![0_u64; n_words];
+                    if u < n {
+                        bits[u >> 6] |= 1_u64 << (u & 63);
+                    }
+                    if let Some(nbs) = graph.get(&u) {
+                        let p_opt = parent[&u];
+                        for &nb in nbs {
+                            if Some(nb) != p_opt {
+                                if let Some(cb) = sub_bits.get(&nb) {
+                                    for w in 0..n_words {
+                                        bits[w] |= cb[w];
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    sub_bits.insert(u, bits);
+                }
+                let all_bits = sub_bits
+                    .get(&root)
+                    .cloned()
+                    .unwrap_or_else(|| vec![0_u64; n_words]);
+                (parent, sub_bits, all_bits)
             };
 
+        let edge_bits = |start: usize,
+                         blocked: usize,
+                         parent: &HashMap<usize, Option<usize>>,
+                         sub_bits: &HashMap<usize, Vec<u64>>,
+                         all_bits: &[u64]|
+         -> Vec<u64> {
+            if parent.get(&start) == Some(&Some(blocked)) {
+                sub_bits[&start].clone()
+            } else if parent.get(&blocked) == Some(&Some(start)) {
+                let sb = &sub_bits[&blocked];
+                (0..n_words).map(|w| all_bits[w] ^ sb[w]).collect()
+            } else {
+                vec![0_u64; n_words]
+            }
+        };
+
+        let (pre_parent, pre_sub, pre_all) = compute_sub_bits(pre_step3_adj);
         let mut pre_splits: Vec<Vec<u64>> = Vec::new();
         for (&u, nbs) in pre_step3_adj {
             if u >= n {
                 for &v in nbs {
                     if u < v && v >= n {
-                        let b = collect_leaf_bits(u, v, pre_step3_adj);
+                        let b = edge_bits(u, v, &pre_parent, &pre_sub, &pre_all);
                         let pop: u32 = b.iter().map(|w| w.count_ones()).sum();
                         if (pop as usize) >= 2 && (pop as usize) <= n - 2 {
                             pre_splits.push(b);
@@ -4406,10 +5198,9 @@ impl BushwhackerEngine {
             }
         }
 
-        let mut bin_adj = adj_mdl.clone();
-        let mut next_id = bin_adj.keys().copied().max().unwrap_or(n) + 1;
-        let mut states = self.compute_all_directed_fitch_states(
-            &bin_adj,
+        let (mdl_parent, mdl_sub, mdl_all) = compute_sub_bits(adj_mdl);
+        let states = self.compute_all_directed_fitch_states(
+            adj_mdl,
             bitmasks,
             n,
             l,
@@ -4417,90 +5208,196 @@ impl BushwhackerEngine {
             l_eff,
         );
 
-        loop {
-            let Some((&h, _)) = bin_adj.iter().find(|(&u, nbs)| u >= n && nbs.len() >= 4) else {
-                break;
-            };
-            let nbs = bin_adj[&h].clone();
+        let resolve_single_hub = |&h: &usize| -> (usize, Vec<usize>, Vec<(usize, usize)>) {
+            let nbs = &adj_mdl[&h];
             let d = nbs.len();
+            let d_words = (d + 63) / 64;
             let comp_masks: Vec<Vec<u64>> = nbs
                 .iter()
-                .map(|&c| collect_leaf_bits(c, h, &bin_adj))
+                .map(|&c| edge_bits(c, h, &mdl_parent, &mdl_sub, &mdl_all))
                 .collect();
-
-            let mut matched_subset: Option<Vec<usize>> = None;
-            for sp in &pre_splits {
-                let mut u_set = Vec::new();
-                let mut clean = true;
-                for (r, cm) in comp_masks.iter().enumerate() {
-                    let mut has_in = false;
-                    let mut has_out = false;
-                    for w in 0..n_words {
-                        if (cm[w] & sp[w]) != 0 {
-                            has_in = true;
-                        }
-                        if (cm[w] & !sp[w]) != 0 {
-                            has_out = true;
-                        }
-                    }
-                    if has_in && has_out {
-                        clean = false;
-                        break;
-                    }
-                    if has_in {
-                        u_set.push(r);
-                    }
-                }
-                if clean && u_set.len() >= 2 && u_set.len() <= d - 2 {
-                    matched_subset = Some(u_set);
-                    break;
-                }
-            }
-
-            if let Some(chosen_u) = matched_subset {
-                let new_node = next_id;
-                next_id += 1;
-                bin_adj.insert(new_node, vec![h]);
-                bin_adj.get_mut(&h).unwrap().push(new_node);
-                let mut u_ch_states = Vec::with_capacity(chosen_u.len());
-                for &r in &chosen_u {
-                    let c_node = nbs[r];
-                    if let Some(st) = states.remove(&(c_node, h)) {
-                        u_ch_states.push(st.clone());
-                        states.insert((c_node, new_node), st);
-                    }
-                    bin_adj.get_mut(&h).unwrap().retain(|&x| x != c_node);
-                    bin_adj.get_mut(&c_node).unwrap().retain(|&x| x != h);
-                    bin_adj.get_mut(&new_node).unwrap().push(c_node);
-                    bin_adj.get_mut(&c_node).unwrap().push(new_node);
-                }
-                if !u_ch_states.is_empty() {
-                    states.insert((new_node, h), Self::combine_fitch_children(&u_ch_states));
-                }
-                continue;
-            }
-
-            let mut nb_nodes: Vec<usize> = nbs;
-            let mut nb_states: Vec<(Vec<u8>, f64)> = nb_nodes
+            let rep_leaf: Vec<Option<usize>> = comp_masks
                 .iter()
-                .map(|&c| {
-                    states
-                        .get(&(c, h))
-                        .cloned()
-                        .unwrap_or_else(|| (vec![15_u8; l], 1.0))
+                .map(|cm| {
+                    for (w, &word) in cm.iter().enumerate() {
+                        if word != 0 {
+                            return Some(w * 64 + word.trailing_zeros() as usize);
+                        }
+                    }
+                    None
                 })
                 .collect();
 
-            if d > 4 {
-                let cap = 2 * d + 2;
+            let mut hub_splits: Vec<Vec<u64>> = Vec::new();
+            for sp in &pre_splits {
+                let mut cnt_rep = 0usize;
+                for &rl_opt in &rep_leaf {
+                    if let Some(lf) = rl_opt {
+                        if ((sp[lf >> 6] >> (lf & 63)) & 1) != 0 {
+                            cnt_rep += 1;
+                        }
+                    }
+                }
+                if cnt_rep < 2 || cnt_rep > d - 2 {
+                    continue;
+                }
+                let mut pm = vec![0_u64; d_words];
+                let mut u_cnt = 0usize;
+                let mut clean = true;
+                for (r, cm) in comp_masks.iter().enumerate() {
+                    let in_sp = rep_leaf[r]
+                        .map(|lf| ((sp[lf >> 6] >> (lf & 63)) & 1) != 0)
+                        .unwrap_or(false);
+                    if in_sp {
+                        let mut ok = true;
+                        for w in 0..n_words {
+                            if (cm[w] & !sp[w]) != 0 {
+                                ok = false;
+                                break;
+                            }
+                        }
+                        if !ok {
+                            clean = false;
+                            break;
+                        }
+                        pm[r >> 6] |= 1_u64 << (r & 63);
+                        u_cnt += 1;
+                    } else {
+                        let mut ok = true;
+                        for w in 0..n_words {
+                            if (cm[w] & sp[w]) != 0 {
+                                ok = false;
+                                break;
+                            }
+                        }
+                        if !ok {
+                            clean = false;
+                            break;
+                        }
+                    }
+                }
+                if clean && u_cnt >= 2 && u_cnt <= d - 2 {
+                    hub_splits.push(pm);
+                }
+            }
+
+            // Local graph: 0..d are external ports, d is hub center `h`, >d are new internal nodes
+            let mut local_adj: Vec<Vec<usize>> = Vec::with_capacity(2 * d);
+            for _ in 0..d {
+                local_adj.push(vec![d]);
+            }
+            local_adj.push((0..d).collect());
+
+            let mut item_pm: Vec<Vec<u64>> = (0..=d)
+                .map(|idx| {
+                    let mut v = vec![0_u64; d_words];
+                    if idx < d {
+                        v[idx >> 6] |= 1_u64 << (idx & 63);
+                    }
+                    v
+                })
+                .collect();
+
+            let mut in_states: Vec<(Vec<u8>, f64)> = Vec::with_capacity(2 * d);
+            for &c in nbs {
+                in_states.push(
+                    states
+                        .get(&(c, h))
+                        .cloned()
+                        .unwrap_or_else(|| (vec![15_u8; l], 1.0)),
+                );
+            }
+            in_states.push((vec![15_u8; l], 1.0)); // dummy slot for center `d`
+
+            // 1. Apply all compatible pre-step3 splits locally
+            while local_adj[d].len() >= 4 {
+                let cur_nbs = local_adj[d].clone();
+                let cur_d = cur_nbs.len();
+                let mut matched: Option<Vec<usize>> = None;
+                for sp_pm in &hub_splits {
+                    let mut u_set = Vec::new();
+                    let mut clean = true;
+                    for &item in &cur_nbs {
+                        let pm = &item_pm[item];
+                        let mut has_in = false;
+                        let mut has_out = false;
+                        for w in 0..d_words {
+                            if (pm[w] & sp_pm[w]) != 0 {
+                                has_in = true;
+                            }
+                            if (pm[w] & !sp_pm[w]) != 0 {
+                                has_out = true;
+                            }
+                        }
+                        if has_in && has_out {
+                            clean = false;
+                            break;
+                        }
+                        if has_in {
+                            u_set.push(item);
+                        }
+                    }
+                    if clean && u_set.len() >= 2 && u_set.len() <= cur_d - 2 {
+                        matched = Some(u_set);
+                        break;
+                    }
+                }
+                let Some(chosen_items) = matched else {
+                    break;
+                };
+                let w_loc = local_adj.len();
+                local_adj.push(vec![d]);
+                local_adj[d].push(w_loc);
+                let mut pm_w = vec![0_u64; d_words];
+                for &it in &chosen_items {
+                    for w in 0..d_words {
+                        pm_w[w] |= item_pm[it][w];
+                    }
+                    local_adj[d].retain(|&x| x != it);
+                    local_adj[it].retain(|&x| x != d);
+                    local_adj[w_loc].push(it);
+                    local_adj[it].push(w_loc);
+                }
+                let ch_refs: Vec<(&[u8], f64)> = chosen_items
+                    .iter()
+                    .map(|&it| (in_states[it].0.as_slice(), in_states[it].1))
+                    .collect();
+                let st_w = Self::combine_fitch_children_refs(&ch_refs);
+                item_pm.push(pm_w);
+                in_states.push(st_w);
+            }
+
+            // 2. If remaining degree > 4, reduce down to 4 via SWAR-accelerated Neighbor-Joining
+            if local_adj[d].len() > 4 {
+                let mut nb_items: Vec<usize> = local_adj[d].clone();
+                let rem_d = nb_items.len();
+                let cap = 2 * rem_d + 2;
                 let mut d_mat = vec![0.0_f64; cap * cap];
                 let mut row_sums = vec![0.0_f64; cap];
-                for a in 0..d {
-                    let s1 = &nb_states[a].0;
-                    for b in (a + 1)..d {
-                        let s2 = &nb_states[b].0;
+                let chunks = l / 8;
+                for a in 0..rem_d {
+                    let s1 = &in_states[nb_items[a]].0;
+                    for b in (a + 1)..rem_d {
+                        let s2 = &in_states[nb_items[b]].0;
                         let mut w_diff = 0.0_f64;
-                        for s in 0..l {
+                        for c_idx in 0..chunks {
+                            let off = c_idx * 8;
+                            let w1 = u64::from_ne_bytes(s1[off..off + 8].try_into().unwrap());
+                            let w2 = u64::from_ne_bytes(s2[off..off + 8].try_into().unwrap());
+                            let inter = w1 & w2;
+                            let zero_hi = !(inter.wrapping_add(0x7F7F_7F7F_7F7F_7F7F))
+                                & 0x8080_8080_8080_8080;
+                            if zero_hi != 0 {
+                                for s in off..(off + 8) {
+                                    let b1 = s1[s];
+                                    let b2 = s2[s];
+                                    if b1 != 15 && b2 != 15 && (b1 & b2) == 0 {
+                                        w_diff += site_weights[s];
+                                    }
+                                }
+                            }
+                        }
+                        for s in (chunks * 8)..l {
                             let b1 = s1[s];
                             let b2 = s2[s];
                             if b1 != 15 && b2 != 15 && (b1 & b2) == 0 {
@@ -4513,7 +5410,7 @@ impl BushwhackerEngine {
                         row_sums[b] += w_diff;
                     }
                 }
-                let mut active: Vec<usize> = (0..d).collect();
+                let mut active: Vec<usize> = (0..rem_d).collect();
                 while active.len() > 4 {
                     let k = active.len();
                     let k_m2 = (k as f64) - 2.0;
@@ -4533,26 +5430,26 @@ impl BushwhackerEngine {
                     }
                     let lu = active[best_pair.0];
                     let lv = active[best_pair.1];
-                    let gu = nb_nodes[lu];
-                    let gv = nb_nodes[lv];
-                    let new_node = next_id;
-                    next_id += 1;
-                    let lw = nb_nodes.len();
-                    nb_nodes.push(new_node);
-                    let st_w = Self::combine_fitch_children(&[
-                        nb_states[lu].clone(),
-                        nb_states[lv].clone(),
-                    ]);
-                    states.insert((new_node, h), st_w.clone());
-                    nb_states.push(st_w);
+                    let iu = nb_items[lu];
+                    let iv = nb_items[lv];
+                    let w_loc = local_adj.len();
+                    let lw = nb_items.len();
+                    nb_items.push(w_loc);
 
-                    bin_adj.insert(new_node, vec![h, gu, gv]);
-                    bin_adj.get_mut(&h).unwrap().retain(|&x| x != gu && x != gv);
-                    bin_adj.get_mut(&h).unwrap().push(new_node);
-                    bin_adj.get_mut(&gu).unwrap().retain(|&x| x != h);
-                    bin_adj.get_mut(&gu).unwrap().push(new_node);
-                    bin_adj.get_mut(&gv).unwrap().retain(|&x| x != h);
-                    bin_adj.get_mut(&gv).unwrap().push(new_node);
+                    let st_w = Self::combine_fitch_children_refs(&[
+                        (in_states[iu].0.as_slice(), in_states[iu].1),
+                        (in_states[iv].0.as_slice(), in_states[iv].1),
+                    ]);
+                    in_states.push(st_w);
+                    item_pm.push(vec![0_u64; d_words]);
+
+                    local_adj.push(vec![d, iu, iv]);
+                    local_adj[d].retain(|&x| x != iu && x != iv);
+                    local_adj[d].push(w_loc);
+                    local_adj[iu].retain(|&x| x != d);
+                    local_adj[iu].push(w_loc);
+                    local_adj[iv].retain(|&x| x != d);
+                    local_adj[iv].push(w_loc);
 
                     let d_uv = d_mat[lu * cap + lv];
                     let limb_u =
@@ -4574,24 +5471,20 @@ impl BushwhackerEngine {
                 }
             }
 
-            let nbs4 = bin_adj[&h].clone();
-            if nbs4.len() == 4 {
-                let nb4_states: Vec<(Vec<u8>, f64)> = nbs4
+            // 3. Exact 3-quartet MDL resolution if remaining degree == 4
+            if local_adj[d].len() == 4 {
+                let nbs4 = local_adj[d].clone();
+                let r4: Vec<(&[u8], f64)> = nbs4
                     .iter()
-                    .map(|&c| {
-                        states
-                            .get(&(c, h))
-                            .cloned()
-                            .unwrap_or_else(|| (vec![15_u8; l], 1.0))
-                    })
+                    .map(|&it| (in_states[it].0.as_slice(), in_states[it].1))
                     .collect();
                 let pairings = [([0usize, 1], [2usize, 3]), ([0, 2], [1, 3]), ([0, 3], [1, 2])];
                 let mut best_p = [0usize, 1];
                 let mut best_g = f64::NEG_INFINITY;
                 for (p1, p2) in pairings {
-                    let (g, _, _) = self.compute_split_mdl_gain_from_children(
-                        &[nb4_states[p1[0]].clone(), nb4_states[p1[1]].clone()],
-                        &[nb4_states[p2[0]].clone(), nb4_states[p2[1]].clone()],
+                    let (g, _, _) = self.compute_split_mdl_gain_from_child_refs(
+                        &[r4[p1[0]], r4[p1[1]]],
+                        &[r4[p2[0]], r4[p2[1]]],
                         l,
                         l_eff,
                         ti_cost,
@@ -4603,23 +5496,82 @@ impl BushwhackerEngine {
                         best_p = p1;
                     }
                 }
-                let new_node = next_id;
-                next_id += 1;
+                let w_loc = local_adj.len();
                 let c0 = nbs4[best_p[0]];
                 let c1 = nbs4[best_p[1]];
-                let st_w = Self::combine_fitch_children(&[
-                    nb4_states[best_p[0]].clone(),
-                    nb4_states[best_p[1]].clone(),
-                ]);
-                states.insert((new_node, h), st_w);
-                bin_adj.insert(new_node, vec![h, c0, c1]);
-                bin_adj.get_mut(&h).unwrap().retain(|&x| x != c0 && x != c1);
-                bin_adj.get_mut(&h).unwrap().push(new_node);
-                bin_adj.get_mut(&c0).unwrap().retain(|&x| x != h);
-                bin_adj.get_mut(&c0).unwrap().push(new_node);
-                bin_adj.get_mut(&c1).unwrap().retain(|&x| x != h);
-                bin_adj.get_mut(&c1).unwrap().push(new_node);
+                local_adj.push(vec![d, c0, c1]);
+                local_adj[d].retain(|&x| x != c0 && x != c1);
+                local_adj[d].push(w_loc);
+                local_adj[c0].retain(|&x| x != d);
+                local_adj[c0].push(w_loc);
+                local_adj[c1].retain(|&x| x != d);
+                local_adj[c1].push(w_loc);
             }
+
+            let k_new = local_adj.len() - (d + 1);
+            let port_owner: Vec<usize> = (0..d).map(|r| local_adj[r][0] - d).collect();
+            let mut local_int_edges: Vec<(usize, usize)> = Vec::with_capacity(k_new);
+            for a in d..local_adj.len() {
+                for &b in &local_adj[a] {
+                    if b >= d && a < b {
+                        local_int_edges.push((a - d, b - d));
+                    }
+                }
+            }
+            (k_new, port_owner, local_int_edges)
+        };
+
+        #[cfg(not(target_arch = "wasm32"))]
+        let hub_resolutions: Vec<(usize, Vec<usize>, Vec<(usize, usize)>)> =
+            hubs.par_iter().map(resolve_single_hub).collect();
+
+        #[cfg(target_arch = "wasm32")]
+        let hub_resolutions: Vec<(usize, Vec<usize>, Vec<(usize, usize)>)> =
+            hubs.iter().map(resolve_single_hub).collect();
+
+        // Deterministically assign global node IDs and splice all local hub resolutions into `bin_adj`
+        let mut next_id = adj_mdl.keys().copied().max().unwrap_or(n) + 1;
+        let mut bin_adj: BTreeMap<usize, Vec<usize>> =
+            adj_mdl.keys().map(|&u| (u, Vec::new())).collect();
+        let mut end_owner: HashMap<(usize, usize), usize> = HashMap::new();
+
+        for (&h, (k_new, port_owner, local_int_edges)) in hubs.iter().zip(&hub_resolutions) {
+            let base_id = next_id;
+            next_id += *k_new;
+            for j in 0..*k_new {
+                bin_adj.insert(base_id + j, Vec::with_capacity(3));
+            }
+            let map_loc = |loc: usize| -> usize {
+                if loc == 0 {
+                    h
+                } else {
+                    base_id + loc - 1
+                }
+            };
+            let nbs = &adj_mdl[&h];
+            for (r, &nb) in nbs.iter().enumerate() {
+                end_owner.insert((h, nb), map_loc(port_owner[r]));
+            }
+            for &(lu, lv) in local_int_edges {
+                let gu = map_loc(lu);
+                let gv = map_loc(lv);
+                bin_adj.get_mut(&gu).unwrap().push(gv);
+                bin_adj.get_mut(&gv).unwrap().push(gu);
+            }
+        }
+
+        for (&u, nbs) in adj_mdl {
+            for &v in nbs {
+                if u < v {
+                    let ou = end_owner.get(&(u, v)).copied().unwrap_or(u);
+                    let ov = end_owner.get(&(v, u)).copied().unwrap_or(v);
+                    bin_adj.get_mut(&ou).unwrap().push(ov);
+                    bin_adj.get_mut(&ov).unwrap().push(ou);
+                }
+            }
+        }
+        for nbs in bin_adj.values_mut() {
+            nbs.sort_unstable();
         }
         bin_adj
     }
@@ -4639,12 +5591,192 @@ impl BushwhackerEngine {
         site_weights: &[f64],
         node_labels: &mut BTreeMap<usize, String>,
         expand_hubs: bool,
+        gtr_edge_stats: Option<&(HashMap<(usize, usize), (f64, f64)>, f64)>,
+        need_fitch_muts: bool,
     ) -> (
         BTreeMap<usize, Vec<usize>>,
         Vec<BranchRecord>,
         HashMap<usize, Vec<i8>>,
         HashMap<(usize, usize), Vec<(usize, i8, i8)>>,
     ) {
+        if let Some((init_stats, emp_scale)) = gtr_edge_stats {
+            let mut cur_stats = init_stats.clone();
+            let block_w = 512usize;
+            let n_blocks = (l + block_w - 1) / block_w;
+            let count_var_block = |b_idx: usize| -> usize {
+                let cs = b_idx * block_w;
+                let ce = (cs + block_w).min(l);
+                let cw = ce - cs;
+                let mut u_masks = [0_u8; 512];
+                for i in 0..n {
+                    let row = &bitmasks[i * l + cs..i * l + ce];
+                    for k in 0..cw {
+                        let m = row[k] & 15;
+                        if m != 15 {
+                            u_masks[k] |= m;
+                        }
+                    }
+                }
+                (0..cw).filter(|&k| u_masks[k].count_ones() >= 2).count()
+            };
+            #[cfg(not(target_arch = "wasm32"))]
+            let m_var: usize = (0..n_blocks).into_par_iter().map(count_var_block).sum();
+            #[cfg(target_arch = "wasm32")]
+            let m_var: usize = (0..n_blocks).map(count_var_block).sum();
+
+            let fisher_n = ((m_var as f64) / std::f64::consts::TAU).max(1.0);
+            let base_pen =
+                0.5 * fisher_n.ln() + 0.5 * ((n.saturating_sub(3)).max(1) as f64).ln();
+            let min_bl = (0.20 / l_eff.max(1.0)).clamp(1e-6, 1e-3);
+
+            loop {
+                let mut bad_edges: Vec<(f64, usize, usize)> = Vec::new();
+                for (&u, nbs) in &adj {
+                    if u >= n && nbs.len() >= 3 {
+                        let deg_u = nbs.len().saturating_sub(1);
+                        for &v in nbs {
+                            if u < v {
+                                if let Some(v_nbs) = adj.get(&v) {
+                                    if v >= n && v_nbs.len() >= 3 {
+                                        let deg_v = v_nbs.len().saturating_sub(1);
+                                        let (dll, _) =
+                                            cur_stats.get(&(u, v)).copied().unwrap_or((0.0, min_bl));
+                                        let rissanen_pen =
+                                            base_pen + split_topology_cost_nats(deg_u, deg_v);
+                                        let gain = dll - rissanen_pen;
+                                        if gain <= 0.0 {
+                                            bad_edges.push((gain, u, v));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                if bad_edges.is_empty() {
+                    break;
+                }
+                bad_edges.sort_by(|a, b| {
+                    a.0.partial_cmp(&b.0)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                        .then_with(|| a.1.cmp(&b.1))
+                        .then_with(|| a.2.cmp(&b.2))
+                });
+                let mut locked_nodes: HashSet<usize> = HashSet::new();
+                let mut alias: HashMap<usize, usize> = HashMap::new();
+                let mut contracted_any = false;
+
+                for (_gain, raw_u, raw_v) in bad_edges {
+                    let mut u = raw_u;
+                    while let Some(&au) = alias.get(&u) {
+                        u = au;
+                    }
+                    let mut v = raw_v;
+                    while let Some(&av) = alias.get(&v) {
+                        v = av;
+                    }
+                    if u == v || locked_nodes.contains(&u) || locked_nodes.contains(&v) {
+                        continue;
+                    }
+                    if !adj.get(&u).map(|x| x.contains(&v)).unwrap_or(false) {
+                        continue;
+                    }
+                    cur_stats.remove(&(u.min(v), u.max(v)));
+                    adj.get_mut(&u).unwrap().retain(|&x| x != v);
+                    adj.get_mut(&v).unwrap().retain(|&x| x != u);
+                    let v_nbs = adj[&v].clone();
+                    for nb in v_nbs {
+                        let old_stat = cur_stats.remove(&(v.min(nb), v.max(nb)));
+                        adj.get_mut(&nb).unwrap().retain(|&x| x != v);
+                        if nb != u && !adj[&u].contains(&nb) {
+                            adj.get_mut(&u).unwrap().push(nb);
+                            adj.get_mut(&nb).unwrap().push(u);
+                            if let Some(st_val) = old_stat {
+                                cur_stats.insert((u.min(nb), u.max(nb)), st_val);
+                            }
+                        }
+                    }
+                    adj.get_mut(&v).unwrap().clear();
+                    alias.insert(v, u);
+                    locked_nodes.insert(u);
+                    locked_nodes.insert(v);
+                    contracted_any = true;
+                }
+                if !contracted_any {
+                    break;
+                }
+            }
+            adj.retain(|&u, nbs| u < n || !nbs.is_empty());
+
+            let (node_states, edge_mutations) = if need_fitch_muts {
+                let states = self.compute_all_directed_fitch_states(
+                    &adj,
+                    bitmasks,
+                    n,
+                    l,
+                    terminal_loads,
+                    l_eff,
+                );
+                self.reconstruct_nodal_states_and_mutations(
+                    &adj,
+                    bitmasks,
+                    majority_state,
+                    &states,
+                    n,
+                    l,
+                )
+            } else {
+                (HashMap::new(), HashMap::new())
+            };
+
+            let mut edge_pairs: Vec<(usize, usize)> = Vec::new();
+            for (&u, nbs) in &adj {
+                let mut sorted_nbs = nbs.clone();
+                sorted_nbs.sort_unstable();
+                for v in sorted_nbs {
+                    if u < v {
+                        edge_pairs.push((u, v));
+                    }
+                }
+            }
+
+            let branches: Vec<BranchRecord> = edge_pairs
+                .into_iter()
+                .map(|(u, v)| {
+                    let is_int = u >= n && v >= n;
+                    let (dll, tmle) = cur_stats.get(&(u, v)).copied().unwrap_or((0.0, min_bl));
+                    let gain = if is_int {
+                        let deg_u = adj[&u].len().saturating_sub(1);
+                        let deg_v = adj[&v].len().saturating_sub(1);
+                        dll - (base_pen + split_topology_cost_nats(deg_u, deg_v))
+                    } else {
+                        dll
+                    };
+                    let syn_sites: Vec<usize> = edge_mutations
+                        .get(&(u, v))
+                        .map(|ms| ms.iter().map(|x| x.0).collect())
+                        .unwrap_or_default();
+                    let m_cnt = edge_mutations
+                        .get(&(u, v))
+                        .map(|m| m.len() as f64)
+                        .unwrap_or(0.0);
+                    let eff_mut = (tmle * (*emp_scale) * l_eff).max(m_cnt);
+                    let support = 1.0 / (1.0 + (-gain.clamp(-50.0, 50.0)).exp());
+                    BranchRecord {
+                        u,
+                        v,
+                        is_internal: is_int,
+                        mutation_count: eff_mut,
+                        branch_length: tmle.max(min_bl),
+                        mdl_gain_nats: gain,
+                        mdl_support: support,
+                        synapomorphy_sites: syn_sites,
+                    }
+                })
+                .collect();
+
+            return (adj, branches, node_states, edge_mutations);
+        }
         let passes = if expand_hubs { 2 } else { 1 };
         for outer_pass in 0..passes {
             loop {
@@ -4796,47 +5928,57 @@ impl BushwhackerEngine {
             l,
         );
 
-        let mut branches = Vec::new();
+        let mut edge_pairs: Vec<(usize, usize)> = Vec::new();
         for (&u, nbs) in &adj {
             let mut sorted_nbs = nbs.clone();
             sorted_nbs.sort_unstable();
             for v in sorted_nbs {
                 if u < v {
-                    let is_int = u >= n && v >= n;
-                    let m_count = edge_mutations
-                        .get(&(u, v))
-                        .map(|m| m.len() as f64)
-                        .unwrap_or(0.0);
-                    let (gain, eff_mut, syn_sites) = if is_int {
-                        let (g, m_syn, sites) = self.evaluate_internal_edge_mdl_gain(
-                            u,
-                            v,
-                            &adj,
-                            &states,
-                            l,
-                            l_eff,
-                            ti_cost,
-                            tv_cost,
-                            site_weights,
-                        );
-                        (g, m_count.max(m_syn), sites)
-                    } else {
-                        (m_count * 2.0, m_count, Vec::new())
-                    };
-                    let support = 1.0 / (1.0 + (-gain.clamp(-50.0, 50.0)).exp());
-                    branches.push(BranchRecord {
-                        u,
-                        v,
-                        is_internal: is_int,
-                        mutation_count: eff_mut,
-                        branch_length: eff_mut / l_eff,
-                        mdl_gain_nats: gain,
-                        mdl_support: support,
-                        synapomorphy_sites: syn_sites,
-                    });
+                    edge_pairs.push((u, v));
                 }
             }
         }
+
+        let build_branch_rec = |&(u, v): &(usize, usize)| -> BranchRecord {
+            let is_int = u >= n && v >= n;
+            let m_count = edge_mutations
+                .get(&(u, v))
+                .map(|m| m.len() as f64)
+                .unwrap_or(0.0);
+            let (gain, eff_mut, syn_sites) = if is_int {
+                let (g, m_syn, sites) = self.evaluate_internal_edge_mdl_gain(
+                    u,
+                    v,
+                    &adj,
+                    &states,
+                    l,
+                    l_eff,
+                    ti_cost,
+                    tv_cost,
+                    site_weights,
+                );
+                (g, m_count.max(m_syn), sites)
+            } else {
+                (m_count * 2.0, m_count, Vec::new())
+            };
+            let support = 1.0 / (1.0 + (-gain.clamp(-50.0, 50.0)).exp());
+            BranchRecord {
+                u,
+                v,
+                is_internal: is_int,
+                mutation_count: eff_mut,
+                branch_length: eff_mut / l_eff,
+                mdl_gain_nats: gain,
+                mdl_support: support,
+                synapomorphy_sites: syn_sites,
+            }
+        };
+
+        #[cfg(not(target_arch = "wasm32"))]
+        let branches: Vec<BranchRecord> = edge_pairs.par_iter().map(build_branch_rec).collect();
+
+        #[cfg(target_arch = "wasm32")]
+        let branches: Vec<BranchRecord> = edge_pairs.iter().map(build_branch_rec).collect();
 
         (adj, branches, node_states, edge_mutations)
     }
@@ -4879,13 +6021,23 @@ impl BushwhackerEngine {
             });
             v_sub.truncate(12);
         }
-        let u_children: Vec<(Vec<u8>, f64)> =
-            u_sub.iter().map(|&nb| states[&(nb, u)].clone()).collect();
-        let v_children: Vec<(Vec<u8>, f64)> =
-            v_sub.iter().map(|&nb| states[&(nb, v)].clone()).collect();
-        let (gain_sub, m_opt, sites) = self.compute_split_mdl_gain_from_children(
-            &u_children,
-            &v_children,
+        let u_refs: Vec<(&[u8], f64)> = u_sub
+            .iter()
+            .map(|&nb| {
+                let st = &states[&(nb, u)];
+                (st.0.as_slice(), st.1)
+            })
+            .collect();
+        let v_refs: Vec<(&[u8], f64)> = v_sub
+            .iter()
+            .map(|&nb| {
+                let st = &states[&(nb, v)];
+                (st.0.as_slice(), st.1)
+            })
+            .collect();
+        let (gain_sub, m_opt, sites) = self.compute_split_mdl_gain_from_child_refs(
+            &u_refs,
+            &v_refs,
             l,
             l_eff,
             ti_cost,
@@ -4893,7 +6045,7 @@ impl BushwhackerEngine {
             site_weights,
         );
         let extra_topo = split_topology_cost_nats(deg_u, deg_v)
-            - split_topology_cost_nats(u_children.len(), v_children.len());
+            - split_topology_cost_nats(u_refs.len(), v_refs.len());
         (gain_sub - extra_topo, m_opt, sites)
     }
 
@@ -4908,12 +6060,42 @@ impl BushwhackerEngine {
         tv_cost: f64,
         site_weights: &[f64],
     ) -> (f64, f64, Vec<usize>) {
+        let u_refs: Vec<(&[u8], f64)> = u_children
+            .iter()
+            .map(|(s, m)| (s.as_slice(), *m))
+            .collect();
+        let v_refs: Vec<(&[u8], f64)> = v_children
+            .iter()
+            .map(|(s, m)| (s.as_slice(), *m))
+            .collect();
+        self.compute_split_mdl_gain_from_child_refs(
+            &u_refs,
+            &v_refs,
+            l,
+            l_eff,
+            ti_cost,
+            tv_cost,
+            site_weights,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn compute_split_mdl_gain_from_child_refs(
+        &self,
+        u_children: &[(&[u8], f64)],
+        v_children: &[(&[u8], f64)],
+        l: usize,
+        l_eff: f64,
+        ti_cost: f64,
+        tv_cost: f64,
+        site_weights: &[f64],
+    ) -> (f64, f64, Vec<usize>) {
         let deg_a = u_children.len();
         let deg_b = v_children.len();
         let topo_cost = split_topology_cost_nats(deg_a, deg_b);
 
-        let all_children: Vec<&(Vec<u8>, f64)> =
-            u_children.iter().chain(v_children.iter()).collect();
+        let all_children: Vec<(&[u8], f64)> =
+            u_children.iter().copied().chain(v_children.iter().copied()).collect();
         let k_ch = all_children.len();
         let mut refined_loads = Vec::with_capacity(k_ch);
 
@@ -4922,9 +6104,9 @@ impl BushwhackerEngine {
             for idx_c in 0..4 {
                 let others: Vec<&[u8]> = (0..4)
                     .filter(|&j| j != idx_c)
-                    .map(|j| all_children[j].0.as_slice())
+                    .map(|j| all_children[j].0)
                     .collect();
-                let mask_c = &all_children[idx_c].0;
+                let mask_c = all_children[idx_c].0;
                 let mut n_anc = 0usize;
                 let mut n_diff = 0usize;
                 for s in 0..l {
@@ -4952,8 +6134,8 @@ impl BushwhackerEngine {
                 }
             }
         } else {
-            for c in &all_children {
-                refined_loads.push(c.1);
+            for &(_, mc) in &all_children {
+                refined_loads.push(mc);
             }
         }
 
@@ -5001,15 +6183,7 @@ impl BushwhackerEngine {
         let mut pos_sites: Vec<(f64, usize, f64, f64)> = Vec::new();
         let mut clean_sites: Vec<usize> = Vec::new();
 
-        for s in 0..l {
-            // Fast bitwise invariant-site check: if all children share a common state, steps_star == 0 < 2
-            let mut m_and = 15_u8;
-            for (s_mask, _) in &all_children {
-                m_and &= s_mask[s];
-            }
-            if m_and != 0 {
-                continue;
-            }
+        let mut eval_polymorphic_site = |s: usize| {
             let mut u_valid = 0i16;
             let mut v_valid = 0i16;
             let mut u_miss = [0i16; 4];
@@ -5019,7 +6193,7 @@ impl BushwhackerEngine {
             let mut cu = [0.0_f64; 4];
             let mut cv = [0.0_f64; 4];
 
-            for ((s_mask, _), &w_c) in u_children.iter().zip(&u_weights) {
+            for (&(s_mask, _), &w_c) in u_children.iter().zip(&u_weights) {
                 let m = s_mask[s];
                 if m != 15 {
                     u_valid += 1;
@@ -5034,9 +6208,9 @@ impl BushwhackerEngine {
                 }
             }
             if u_valid < 2 {
-                continue;
+                return;
             }
-            for ((s_mask, _), &w_c) in v_children.iter().zip(&v_weights) {
+            for (&(s_mask, _), &w_c) in v_children.iter().zip(&v_weights) {
                 let m = s_mask[s];
                 if m != 15 {
                     v_valid += 1;
@@ -5051,7 +6225,7 @@ impl BushwhackerEngine {
                 }
             }
             if v_valid < 2 {
-                continue;
+                return;
             }
 
             let mut steps_star = i16::MAX;
@@ -5076,7 +6250,7 @@ impl BushwhackerEngine {
             }
 
             if steps_star < 2 || b_u_opt == b_v_opt {
-                continue;
+                return;
             }
 
             let min_cu = cu[b_u_opt];
@@ -5096,7 +6270,7 @@ impl BushwhackerEngine {
             let masked_v = u_clean && v_asym >= 1.5 && raw_delta >= 2.8;
 
             if !(both_parsimony || masked_u || masked_v) {
-                continue;
+                return;
             }
 
             let same_purine = IS_PURINE[b_u_opt] == IS_PURINE[b_v_opt];
@@ -5119,6 +6293,31 @@ impl BushwhackerEngine {
             let site_sav = delta_pos + delta_steps * subst_s;
             if site_sav > 0.0 {
                 pos_sites.push((site_sav, s, subst_s, site_weights[s]));
+            }
+        };
+
+        // 64-bit SWAR 8-site-at-a-time invariant skipping (visits polymorphic sites in exact ascending order)
+        let chunks = l / 8;
+        for c in 0..chunks {
+            let off = c * 8;
+            let mut w_and = 0x0F0F_0F0F_0F0F_0F0F_u64;
+            for &(s_mask, _) in &all_children {
+                w_and &= u64::from_le_bytes(s_mask[off..off + 8].try_into().unwrap());
+            }
+            let mut zb = !(w_and.wrapping_add(0x7F7F_7F7F_7F7F_7F7F)) & 0x8080_8080_8080_8080;
+            while zb != 0 {
+                let j = (zb.trailing_zeros() / 8) as usize;
+                eval_polymorphic_site(off + j);
+                zb &= zb - 1;
+            }
+        }
+        for s in (chunks * 8)..l {
+            let mut m_and = 15_u8;
+            for &(s_mask, _) in &all_children {
+                m_and &= s_mask[s];
+            }
+            if m_and == 0 {
+                eval_polymorphic_site(s);
             }
         }
 
@@ -5207,106 +6406,146 @@ impl BushwhackerEngine {
 
         let mut parent: HashMap<usize, Option<usize>> = HashMap::new();
         parent.insert(root, None);
-        let mut order = vec![root];
-        let mut q = VecDeque::new();
-        q.push_back(root);
-        while let Some(curr) = q.pop_front() {
-            if let Some(nbs) = adj.get(&curr) {
-                for &nb in nbs {
-                    if !parent.contains_key(&nb) {
-                        parent.insert(nb, Some(curr));
-                        order.push(nb);
-                        q.push_back(nb);
+        let mut levels: Vec<Vec<usize>> = vec![vec![root]];
+        let mut total_nodes = 1usize;
+        loop {
+            let mut next_level = Vec::new();
+            for &curr in levels.last().unwrap() {
+                if let Some(nbs) = adj.get(&curr) {
+                    for &nb in nbs {
+                        if !parent.contains_key(&nb) {
+                            parent.insert(nb, Some(curr));
+                            next_level.push(nb);
+                        }
                     }
                 }
             }
+            if next_level.is_empty() {
+                break;
+            }
+            total_nodes += next_level.len();
+            levels.push(next_level);
         }
 
-        let mut node_state: HashMap<usize, Vec<i8>> = HashMap::new();
-        let mut node_mask_dict: HashMap<usize, Vec<u8>> = HashMap::new();
-        let mut edge_mutations: HashMap<(usize, usize), Vec<(usize, i8, i8)>> = HashMap::new();
+        let mut node_state: HashMap<usize, Vec<i8>> = HashMap::with_capacity(total_nodes);
+        let mut node_mask_dict: HashMap<usize, Vec<u8>> = HashMap::with_capacity(total_nodes);
+        let mut edge_mutations: HashMap<(usize, usize), Vec<(usize, i8, i8)>> =
+            HashMap::with_capacity(total_nodes);
 
         let maj_bit: Vec<u8> = majority_state.iter().map(|&b| 1_u8 << (b as u8)).collect();
 
-        for &u in &order {
-            let p_opt = parent[&u];
-            let c_mask = if u < n {
-                bitmasks[u * l..(u + 1) * l].to_vec()
-            } else {
-                let children: Vec<(Vec<u8>, f64)> = adj[&u]
-                    .iter()
-                    .copied()
-                    .filter(|&nb| Some(nb) != p_opt)
-                    .map(|c| states[&(c, u)].clone())
-                    .collect();
-                Self::combine_fitch_children(&children).0
-            };
-            node_mask_dict.insert(u, c_mask.clone());
-
-            if let Some(p) = p_opt {
-                let p_st = &node_state[&p];
-                let p_bit: Vec<u8> = p_st.iter().map(|&b| 1_u8 << (b as u8)).collect();
-                let mpr_mask = if u < n {
-                    c_mask
-                } else {
-                    let mut star_list: Vec<(Vec<u8>, f64)> = adj[&u]
-                        .iter()
-                        .copied()
-                        .filter(|&nb| nb != p)
-                        .map(|c| states[&(c, u)].clone())
-                        .collect();
-                    star_list.push((p_bit.clone(), 1.0));
-                    Self::combine_fitch_children(&star_list).0
-                };
-                let mut st = vec![0_i8; l];
-                for s in 0..l {
-                    let m = mpr_mask[s];
-                    if (m & p_bit[s]) != 0 {
-                        st[s] = p_st[s];
-                    } else if (m & maj_bit[s]) != 0 {
-                        st[s] = majority_state[s];
+        for level in &levels {
+            let compute_node =
+                |&u: &usize| -> (usize, Vec<u8>, Vec<i8>, Option<((usize, usize), Vec<(usize, i8, i8)>)>) {
+                    let p_opt = parent[&u];
+                    let c_mask = if u < n {
+                        bitmasks[u * l..(u + 1) * l].to_vec()
+                    } else if let Some(p) = p_opt {
+                        states[&(u, p)].0.clone()
                     } else {
-                        for b in 0..4_i8 {
-                            if ((m >> b) & 1) != 0 {
-                                st[s] = b;
-                                break;
-                            }
-                        }
-                    }
-                }
-                node_state.insert(u, st);
+                        let child_refs: Vec<(&[u8], f64)> = adj[&u]
+                            .iter()
+                            .copied()
+                            .map(|c| {
+                                let st = &states[&(c, u)];
+                                (st.0.as_slice(), st.1)
+                            })
+                            .collect();
+                        Self::combine_fitch_children_refs(&child_refs).0
+                    };
 
-                let st_p = &node_state[&p];
-                let st_u = &node_state[&u];
-                let mask_p = &node_mask_dict[&p];
-                let mask_u = &node_mask_dict[&u];
-                let mut muts = Vec::new();
-                for s in 0..l {
-                    if mask_p[s] != 15 && mask_u[s] != 15 && st_p[s] != st_u[s] {
-                        if p < u {
-                            muts.push((s, st_p[s], st_u[s]));
+                    if let Some(p) = p_opt {
+                        let p_st = &node_state[&p];
+                        let p_bit: Vec<u8> = p_st.iter().map(|&b| 1_u8 << (b as u8)).collect();
+                        let mpr_mask = if u < n {
+                            c_mask.clone()
                         } else {
-                            muts.push((s, st_u[s], st_p[s]));
-                        }
-                    }
-                }
-                edge_mutations.insert((p.min(u), p.max(u)), muts);
-            } else {
-                let mut st = vec![0_i8; l];
-                for s in 0..l {
-                    let m = c_mask[s];
-                    if (m & maj_bit[s]) != 0 {
-                        st[s] = majority_state[s];
-                    } else {
-                        for b in 0..4_i8 {
-                            if ((m >> b) & 1) != 0 {
-                                st[s] = b;
-                                break;
+                            let mut star_refs: Vec<(&[u8], f64)> = adj[&u]
+                                .iter()
+                                .copied()
+                                .filter(|&nb| nb != p)
+                                .map(|c| {
+                                    let st = &states[&(c, u)];
+                                    (st.0.as_slice(), st.1)
+                                })
+                                .collect();
+                            star_refs.push((p_bit.as_slice(), 1.0));
+                            Self::combine_fitch_children_refs(&star_refs).0
+                        };
+                        let mut st = vec![0_i8; l];
+                        for s in 0..l {
+                            let m = mpr_mask[s];
+                            if (m & p_bit[s]) != 0 {
+                                st[s] = p_st[s];
+                            } else if (m & maj_bit[s]) != 0 {
+                                st[s] = majority_state[s];
+                            } else {
+                                for b in 0..4_i8 {
+                                    if ((m >> b) & 1) != 0 {
+                                        st[s] = b;
+                                        break;
+                                    }
+                                }
                             }
                         }
+
+                        let mask_p = &node_mask_dict[&p];
+                        let mut muts = Vec::new();
+                        for s in 0..l {
+                            if mask_p[s] != 15 && c_mask[s] != 15 && p_st[s] != st[s] {
+                                if p < u {
+                                    muts.push((s, p_st[s], st[s]));
+                                } else {
+                                    muts.push((s, st[s], p_st[s]));
+                                }
+                            }
+                        }
+                        (u, c_mask, st, Some(((p.min(u), p.max(u)), muts)))
+                    } else {
+                        let mut st = vec![0_i8; l];
+                        for s in 0..l {
+                            let m = c_mask[s];
+                            if (m & maj_bit[s]) != 0 {
+                                st[s] = majority_state[s];
+                            } else {
+                                for b in 0..4_i8 {
+                                    if ((m >> b) & 1) != 0 {
+                                        st[s] = b;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        (u, c_mask, st, None)
                     }
-                }
+                };
+
+            #[cfg(not(target_arch = "wasm32"))]
+            let results: Vec<(
+                usize,
+                Vec<u8>,
+                Vec<i8>,
+                Option<((usize, usize), Vec<(usize, i8, i8)>)>,
+            )> = if level.len() >= 8 {
+                level.par_iter().map(compute_node).collect()
+            } else {
+                level.iter().map(compute_node).collect()
+            };
+
+            #[cfg(target_arch = "wasm32")]
+            let results: Vec<(
+                usize,
+                Vec<u8>,
+                Vec<i8>,
+                Option<((usize, usize), Vec<(usize, i8, i8)>)>,
+            )> = level.iter().map(compute_node).collect();
+
+            for (u, cm, st, em_opt) in results {
+                node_mask_dict.insert(u, cm);
                 node_state.insert(u, st);
+                if let Some((ekey, muts)) = em_opt {
+                    edge_mutations.insert(ekey, muts);
+                }
             }
         }
 
@@ -5394,20 +6633,25 @@ impl BushwhackerEngine {
             l,
         );
 
-        let mut node_valid: HashMap<usize, Vec<bool>> = HashMap::new();
-        for &u in &active_nodes {
+        let build_valid = |&u: &usize| -> (usize, Vec<bool>) {
             if u < n {
                 let row = &mat[u * l..(u + 1) * l];
-                node_valid.insert(u, row.iter().map(|&x| x >= 0).collect());
+                (u, row.iter().map(|&x| x >= 0).collect())
             } else {
                 let nb_check = parent
                     .get(&u)
                     .and_then(|&p| p)
                     .unwrap_or_else(|| adj[&u][0]);
                 let m = &states_dir[&(u, nb_check)].0;
-                node_valid.insert(u, m.iter().map(|&x| x != 15).collect());
+                (u, m.iter().map(|&x| x != 15).collect())
             }
-        }
+        };
+        #[cfg(not(target_arch = "wasm32"))]
+        let node_valid: HashMap<usize, Vec<bool>> =
+            active_nodes.par_iter().map(build_valid).collect();
+        #[cfg(target_arch = "wasm32")]
+        let node_valid: HashMap<usize, Vec<bool>> =
+            active_nodes.iter().map(build_valid).collect();
 
         let orig_branch_by_child = branch_by_child.clone();
         let orig_branch_load = branch_mut_load.clone();
@@ -5494,15 +6738,37 @@ impl BushwhackerEngine {
             }
         }
 
-        let is_ancestor = |a_node: usize, b_node: usize| -> bool {
-            let mut curr = Some(b_node);
-            while let Some(c) = curr {
-                if c == a_node {
-                    return true;
-                }
-                curr = parent.get(&c).copied().flatten();
+        // O(1) Euler-tour ancestor table (zero HashMap pointer chasing inside site loop)
+        let max_node_id = active_nodes.iter().copied().max().unwrap_or(0).max(root);
+        let mut tin = vec![0_u32; max_node_id + 1];
+        let mut tout = vec![0_u32; max_node_id + 1];
+        let mut tree_children: HashMap<usize, Vec<usize>> = HashMap::with_capacity(parent.len());
+        for (&u, &p_opt) in &parent {
+            if let Some(p) = p_opt {
+                tree_children.entry(p).or_default().push(u);
             }
-            false
+        }
+        let mut timer = 0_u32;
+        let mut dfs_stack: Vec<(usize, bool)> = vec![(root, false)];
+        while let Some((u, exiting)) = dfs_stack.pop() {
+            if exiting {
+                tout[u] = timer;
+            } else {
+                timer += 1;
+                tin[u] = timer;
+                dfs_stack.push((u, true));
+                if let Some(ch) = tree_children.get(&u) {
+                    for &c in ch.iter().rev() {
+                        dfs_stack.push((c, false));
+                    }
+                }
+            }
+        }
+        let is_ancestor = |a_node: usize, b_node: usize| -> bool {
+            tin.get(a_node).copied().unwrap_or(0) != 0
+                && tin.get(b_node).copied().unwrap_or(0) != 0
+                && tin[a_node] <= tin[b_node]
+                && tout[b_node] <= tout[a_node]
         };
 
         let mut pair_shared_sites: HashMap<(usize, usize), Vec<usize>> = HashMap::new();
@@ -5603,8 +6869,7 @@ impl BushwhackerEngine {
         });
         sorted_pairs.truncate(500);
 
-        let mut candidate_shunts: Vec<ShuntEdge> = Vec::new();
-        for ((u, v), mut shared_sites) in sorted_pairs {
+        let eval_shunt_pair = |((u, v), mut shared_sites): ((usize, usize), Vec<usize>)| -> Option<ShuntEdge> {
             shared_sites.sort_unstable();
             shared_sites.dedup();
             let avail_sites: Vec<usize> = shared_sites
@@ -5612,7 +6877,7 @@ impl BushwhackerEngine {
                 .filter(|&s| node_valid[&u][s] && node_valid[&v][s])
                 .collect();
             if avail_sites.len() < self.min_shunt_sites {
-                continue;
+                return None;
             }
 
             let (best_int_gain, best_int_sites, best_span, int_data_sav, int_mask_cost) = self
@@ -5665,7 +6930,7 @@ impl BushwhackerEngine {
             };
 
             if best_int_gain <= 0.0 && best_sp_gain <= 0.0 {
-                continue;
+                return None;
             }
 
             let (chosen_mode, chosen_sites, chosen_span, data_sav, mask_cost, net_gain) =
@@ -5690,7 +6955,7 @@ impl BushwhackerEngine {
                 };
 
             let post_prob = 1.0 / (1.0 + (-net_gain.clamp(-50.0, 50.0)).exp());
-            candidate_shunts.push(ShuntEdge {
+            Some(ShuntEdge {
                 node_u: u,
                 node_v: v,
                 label_u: node_labels
@@ -5710,13 +6975,23 @@ impl BushwhackerEngine {
                 endpoint_cost_nats: endpoint_cost,
                 net_mdl_gain_nats: net_gain,
                 posterior_prob: post_prob,
-            });
-        }
+            })
+        };
+
+        #[cfg(not(target_arch = "wasm32"))]
+        let mut candidate_shunts: Vec<ShuntEdge> =
+            sorted_pairs.into_par_iter().filter_map(eval_shunt_pair).collect();
+
+        #[cfg(target_arch = "wasm32")]
+        let mut candidate_shunts: Vec<ShuntEdge> =
+            sorted_pairs.into_iter().filter_map(eval_shunt_pair).collect();
 
         candidate_shunts.sort_by(|a, b| {
             b.net_mdl_gain_nats
                 .partial_cmp(&a.net_mdl_gain_nats)
                 .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.node_u.cmp(&b.node_u))
+                .then_with(|| a.node_v.cmp(&b.node_v))
         });
 
         let mut certified_shunts: Vec<ShuntEdge> = Vec::new();
@@ -6197,12 +7472,52 @@ impl BushwhackerEngine {
         l: usize,
         l_eff: f64,
     ) -> f64 {
-        let child_list: Vec<(Vec<u8>, f64)> = (0..n)
-            .map(|i| (bitmasks[i * l..(i + 1) * l].to_vec(), 1.0))
-            .collect();
-        let (root_mask, _) = Self::combine_fitch_children(&child_list);
-        let mut total_nats = l_eff * 4.0_f64.ln();
-        for i in 0..n {
+        let block_w = 512usize;
+        let n_blocks = (l + block_w - 1) / block_w;
+        let build_root_block = |b_idx: usize| -> Vec<u8> {
+            let cs = b_idx * block_w;
+            let ce = (cs + block_w).min(l);
+            let cw = ce - cs;
+            let mut counts = [[0_u16; 4]; 512];
+            for i in 0..n {
+                let row = &bitmasks[i * l + cs..i * l + ce];
+                for k in 0..cw {
+                    let m = row[k];
+                    if m != 15 {
+                        counts[k][0] += (m & 1) as u16;
+                        counts[k][1] += ((m >> 1) & 1) as u16;
+                        counts[k][2] += ((m >> 2) & 1) as u16;
+                        counts[k][3] += ((m >> 3) & 1) as u16;
+                    }
+                }
+            }
+            let mut out = vec![15_u8; cw];
+            for k in 0..cw {
+                let c = &counts[k];
+                let max_c = c[0].max(c[1]).max(c[2].max(c[3]));
+                if max_c > 0 {
+                    let mut mask = 0_u8;
+                    for b in 0..4 {
+                        if c[b] == max_c {
+                            mask |= 1 << b;
+                        }
+                    }
+                    out[k] = mask;
+                }
+            }
+            out
+        };
+        #[cfg(not(target_arch = "wasm32"))]
+        let root_blocks: Vec<Vec<u8>> = (0..n_blocks).into_par_iter().map(build_root_block).collect();
+        #[cfg(target_arch = "wasm32")]
+        let root_blocks: Vec<Vec<u8>> = (0..n_blocks).map(build_root_block).collect();
+
+        let mut root_mask = Vec::with_capacity(l);
+        for rb in root_blocks {
+            root_mask.extend_from_slice(&rb);
+        }
+
+        let eval_leaf = |i: usize| -> f64 {
             let row = &bitmasks[i * l..(i + 1) * l];
             let mut muts = 0usize;
             for s in 0..l {
@@ -6210,9 +7525,14 @@ impl BushwhackerEngine {
                     muts += 1;
                 }
             }
-            total_nats += branch_mutation_code_nats(muts as f64, l_eff, 0.0, 4);
-        }
-        total_nats
+            branch_mutation_code_nats(muts as f64, l_eff, 0.0, 4)
+        };
+        #[cfg(not(target_arch = "wasm32"))]
+        let leaf_sum: f64 = (0..n).into_par_iter().map(eval_leaf).sum();
+        #[cfg(target_arch = "wasm32")]
+        let leaf_sum: f64 = (0..n).map(eval_leaf).sum();
+
+        l_eff * 4.0_f64.ln() + leaf_sum
     }
 
     fn compute_tree_total_mdl_nats(
@@ -6301,6 +7621,509 @@ impl BushwhackerEngine {
         }
 
         build_sub(root, None, adj, names, &edge_map, &mut visited, n)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn serialize_binary_newick(
+        &self,
+        bin_adj: &BTreeMap<usize, Vec<usize>>,
+        names: &[String],
+        bitmasks: &[u8],
+        majority_state: &[i8],
+        terminal_loads: &[f64],
+        n: usize,
+        l: usize,
+        l_eff: f64,
+        gtr_edge_stats: Option<&HashMap<(usize, usize), (f64, f64)>>,
+    ) -> String {
+        if n == 1 {
+            return format!("{}:0.000010;", names[0]);
+        }
+        let min_bl = (0.20 / l_eff.max(1.0)).clamp(1e-6, 1e-3);
+        if n == 2 {
+            return format!("({}:{min_bl:.6},{}:{min_bl:.6});", names[0], names[1]);
+        }
+        let mut edge_bl: HashMap<(usize, usize), f64> = HashMap::new();
+        if let Some(stats) = gtr_edge_stats {
+            let mut all_covered = true;
+            for (&u, nbs) in bin_adj {
+                for &v in nbs {
+                    if u < v {
+                        if let Some(&(_, tmle)) = stats.get(&(u, v)) {
+                            edge_bl.insert((u, v), tmle.max(min_bl));
+                        } else {
+                            all_covered = false;
+                            break;
+                        }
+                    }
+                }
+                if !all_covered {
+                    break;
+                }
+            }
+            if !all_covered {
+                edge_bl.clear();
+            }
+        }
+        if edge_bl.is_empty() {
+            let states = self.compute_all_directed_fitch_states(
+                bin_adj,
+                bitmasks,
+                n,
+                l,
+                terminal_loads,
+                l_eff,
+            );
+            let (_, edge_mutations) = self.reconstruct_nodal_states_and_mutations(
+                bin_adj,
+                bitmasks,
+                majority_state,
+                &states,
+                n,
+                l,
+            );
+            for (&u, nbs) in bin_adj {
+                for &v in nbs {
+                    if u < v {
+                        let m_cnt = edge_mutations
+                            .get(&(u, v))
+                            .map(|m| m.len() as f64)
+                            .unwrap_or(0.0);
+                        let bl = (m_cnt / l_eff.max(1.0)).max(min_bl);
+                        edge_bl.insert((u, v), bl);
+                    }
+                }
+            }
+        }
+
+        let root = bin_adj
+            .iter()
+            .filter(|(&u, nbs)| u >= n && !nbs.is_empty())
+            .max_by_key(|(_, nbs)| nbs.len())
+            .map(|(&u, _)| u)
+            .unwrap_or(n);
+        let mut visited: HashSet<usize> = HashSet::new();
+
+        fn build_bin_sub(
+            u: usize,
+            p: Option<usize>,
+            adj: &BTreeMap<usize, Vec<usize>>,
+            names: &[String],
+            edge_bl: &HashMap<(usize, usize), f64>,
+            visited: &mut HashSet<usize>,
+            n: usize,
+            min_bl: f64,
+        ) -> String {
+            visited.insert(u);
+            let label = if u < n {
+                names[u].clone()
+            } else {
+                let children: Vec<usize> = adj[&u]
+                    .iter()
+                    .copied()
+                    .filter(|&nb| Some(nb) != p && !visited.contains(&nb))
+                    .collect();
+                let sub_strs: Vec<String> = children
+                    .into_iter()
+                    .map(|c| build_bin_sub(c, Some(u), adj, names, edge_bl, visited, n, min_bl))
+                    .collect();
+                format!("({})", sub_strs.join(","))
+            };
+            if let Some(parent_node) = p {
+                let bl = edge_bl
+                    .get(&(u.min(parent_node), u.max(parent_node)))
+                    .copied()
+                    .unwrap_or(min_bl);
+                format!("{label}:{bl:.6}")
+            } else {
+                format!("{label};")
+            }
+        }
+
+        build_bin_sub(root, None, bin_adj, names, &edge_bl, &mut visited, n, min_bl)
+    }
+
+    pub fn parse_newick_to_unrooted_adj(
+        newick_str: &str,
+        names: &[String],
+    ) -> Result<(BTreeMap<usize, Vec<usize>>, BTreeMap<usize, String>), String> {
+        let n = names.len();
+        let mut name_to_idx: HashMap<String, usize> = HashMap::with_capacity(n);
+        for (i, nm) in names.iter().enumerate() {
+            name_to_idx.insert(nm.trim().to_string(), i);
+        }
+        let s = newick_str.trim().trim_end_matches(';').trim();
+        let bytes = s.as_bytes();
+        let mut pos = 0usize;
+        let mut next_id = n;
+        let mut children_map: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+
+        fn skip_ws(bytes: &[u8], pos: &mut usize) {
+            while *pos < bytes.len() && bytes[*pos].is_ascii_whitespace() {
+                *pos += 1;
+            }
+        }
+
+        fn parse_node(
+            bytes: &[u8],
+            pos: &mut usize,
+            next_id: &mut usize,
+            name_to_idx: &HashMap<String, usize>,
+            children_map: &mut BTreeMap<usize, Vec<usize>>,
+        ) -> Result<usize, String> {
+            skip_ws(bytes, pos);
+            let my_id = if *pos < bytes.len() && bytes[*pos] == b'(' {
+                *pos += 1;
+                let id = *next_id;
+                *next_id += 1;
+                children_map.insert(id, Vec::new());
+                loop {
+                    let ch_id = parse_node(bytes, pos, next_id, name_to_idx, children_map)?;
+                    children_map.get_mut(&id).unwrap().push(ch_id);
+                    skip_ws(bytes, pos);
+                    if *pos < bytes.len() && bytes[*pos] == b',' {
+                        *pos += 1;
+                    } else if *pos < bytes.len() && bytes[*pos] == b')' {
+                        *pos += 1;
+                        break;
+                    } else {
+                        break;
+                    }
+                }
+                while *pos < bytes.len() && !matches!(bytes[*pos], b':' | b',' | b')' | b';') {
+                    *pos += 1;
+                }
+                id
+            } else {
+                let start = *pos;
+                while *pos < bytes.len() && !matches!(bytes[*pos], b':' | b',' | b')' | b';') {
+                    *pos += 1;
+                }
+                let raw_name = std::str::from_utf8(&bytes[start..*pos])
+                    .map_err(|e| e.to_string())?
+                    .trim()
+                    .trim_matches('\'')
+                    .trim_matches('"');
+                *name_to_idx
+                    .get(raw_name)
+                    .ok_or_else(|| format!("Unknown taxon '{}' in input Newick", raw_name))?
+            };
+
+            skip_ws(bytes, pos);
+            if *pos < bytes.len() && bytes[*pos] == b':' {
+                *pos += 1;
+                while *pos < bytes.len() && !matches!(bytes[*pos], b',' | b')' | b';') {
+                    *pos += 1;
+                }
+            }
+            Ok(my_id)
+        }
+
+        let _root = parse_node(bytes, &mut pos, &mut next_id, &name_to_idx, &mut children_map)?;
+
+        let mut adj: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+        for i in 0..n {
+            adj.insert(i, Vec::new());
+        }
+        for (&u, chs) in &children_map {
+            adj.entry(u).or_default();
+            for &c in chs {
+                adj.entry(u).or_default().push(c);
+                adj.entry(c).or_default().push(u);
+            }
+        }
+
+        // Smooth out any degree-2 internal nodes (such as a rooted binary root)
+        loop {
+            let deg2 = adj
+                .iter()
+                .find(|(&u, nbs)| u >= n && nbs.len() == 2)
+                .map(|(&u, nbs)| (u, nbs[0], nbs[1]));
+            let Some((u, a, b)) = deg2 else {
+                break;
+            };
+            adj.remove(&u);
+            if let Some(na) = adj.get_mut(&a) {
+                na.retain(|&x| x != u);
+                if !na.contains(&b) {
+                    na.push(b);
+                }
+            }
+            if let Some(nb) = adj.get_mut(&b) {
+                nb.retain(|&x| x != u);
+                if !nb.contains(&a) {
+                    nb.push(a);
+                }
+            }
+        }
+
+        let mut node_labels = BTreeMap::new();
+        for (i, nm) in names.iter().enumerate() {
+            node_labels.insert(i, nm.clone());
+        }
+        for &u in adj.keys() {
+            if u >= n {
+                node_labels.insert(u, format!("N{u}"));
+            }
+        }
+        Ok((adj, node_labels))
+    }
+
+    pub fn infer_with_starting_newick(
+        &self,
+        names: &[String],
+        seqs: &[String],
+        input_newick: &str,
+        expand_hubs: bool,
+    ) -> Result<BushwhackerResult, String> {
+        if names.is_empty() {
+            return Err("Empty alignment provided.".to_string());
+        }
+        if let Some(d_mode) = self.discrete_mode {
+            let cm = discrete::encode_discrete_sequences(names, seqs)?;
+            return discrete::infer_discrete_mdl(
+                self,
+                &cm,
+                d_mode,
+                Some((input_newick, expand_hubs)),
+            );
+        }
+        if self.translate_coding && !protein::is_protein_alignment(seqs) {
+            let aa_seqs = protein::translate_coding_alignment(seqs)?;
+            return protein::infer_protein_mdl(
+                self,
+                names,
+                &aa_seqs,
+                Some((input_newick, expand_hubs)),
+            );
+        }
+        if self.force_protein || protein::is_protein_alignment(seqs) {
+            return protein::infer_protein_mdl(
+                self,
+                names,
+                seqs,
+                Some((input_newick, expand_hubs)),
+            );
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        let t0 = Instant::now();
+        let n = names.len();
+        let (mat, bitmasks, majority_state, _, l) = encode_nucleotide_alignment(seqs);
+        let total_valid: usize = mat.iter().filter(|&&x| x >= 0).count();
+        let l_eff = ((total_valid as f64) / (n as f64)).clamp(1.0, l as f64);
+
+        let (ti_cost, tv_cost) = self.estimate_subst_surprise(&mat, n, l);
+        let (raw_dist_w, raw_tree_w, is_coding) = if self.coding_aware {
+            detect_coding_frame_and_weights(&mat, n, l)
+        } else {
+            (vec![1.0; l], vec![1.0; l], false)
+        };
+        let (dw_h0, tw_h0) =
+            self.compute_dual_site_coherence_weights(&mat, n, l, &vec![1.0; l], &vec![1.0; l]);
+        let (dist_weights, tree_weights) = if self.coding_aware && is_coding && n >= 5 {
+            let (dw_h1, tw_h1) =
+                self.compute_dual_site_coherence_weights(&mat, n, l, &raw_dist_w, &raw_tree_w);
+            if self.select_coding_weights_by_mdl(
+                names,
+                &mat,
+                &bitmasks,
+                &majority_state,
+                &dw_h0,
+                &tw_h0,
+                &dw_h1,
+                &tw_h1,
+                n,
+                l,
+                l_eff,
+                ti_cost,
+                tv_cost,
+            ) {
+                (dw_h1, tw_h1)
+            } else {
+                (dw_h0, tw_h0)
+            }
+        } else {
+            (dw_h0, tw_h0)
+        };
+
+        let (terminal_loads, _, _) = self.build_subquadratic_loads_and_backbone(
+            names,
+            &mat,
+            &bitmasks,
+            &dist_weights,
+            &tree_weights,
+            n,
+            l,
+            l_eff,
+            ti_cost,
+            tv_cost,
+            false,
+        );
+        let (mut adj, node_labels) = Self::parse_newick_to_unrooted_adj(input_newick, names)?;
+        let pre_step3_adj = adj.clone();
+
+        let (adj_c, mut branches, _, edge_mutations) = self.contract_unsupported_edges_mdl(
+            adj,
+            &bitmasks,
+            &majority_state,
+            &terminal_loads,
+            n,
+            l,
+            l_eff,
+            ti_cost,
+            tv_cost,
+            &tree_weights,
+            &mut node_labels.clone(),
+            expand_hubs,
+            None,
+            true,
+        );
+        adj = adj_c;
+
+        let bin_adj = self.build_binary_refinement_from_mdl(
+            &adj,
+            &pre_step3_adj,
+            &bitmasks,
+            &terminal_loads,
+            n,
+            l,
+            l_eff,
+            ti_cost,
+            tv_cost,
+            &tree_weights,
+        );
+        let binary_newick = self.serialize_binary_newick(
+            &bin_adj,
+            names,
+            &bitmasks,
+            &majority_state,
+            &terminal_loads,
+            n,
+            l,
+            l_eff,
+            None,
+        );
+        let mut full_labels = node_labels;
+        for &u in adj.keys() {
+            full_labels.entry(u).or_insert_with(|| format!("N{u}"));
+        }
+
+        let mut shunts = Vec::new();
+        if self.detect_shunts && n >= 4 {
+            shunts = self.peel_residual_shunts_mdl(
+                &adj,
+                &full_labels,
+                &bitmasks,
+                &majority_state,
+                &terminal_loads,
+                &edge_mutations,
+                n,
+                l,
+                l_eff,
+                ti_cost,
+                tv_cost,
+                &mat,
+                is_coding,
+            );
+            let int_shunts: Vec<&ShuntEdge> = shunts
+                .iter()
+                .filter(|s| {
+                    s.mode == "INTERVAL" && s.interval_span.is_some() && s.net_mdl_gain_nats >= 15.0
+                })
+                .collect();
+            if !int_shunts.is_empty() {
+                let mut masked_bitmasks = bitmasks.clone();
+                let mut masked_any = false;
+                for sh in int_shunts {
+                    if let Some((a_sp, b_sp)) = sh.interval_span {
+                        let rec_node = if sh.node_u < n {
+                            Some(sh.node_u)
+                        } else if sh.node_v < n {
+                            Some(sh.node_v)
+                        } else {
+                            None
+                        };
+                        if let Some(r_idx) = rec_node {
+                            let row = &mut masked_bitmasks[r_idx * l..(r_idx + 1) * l];
+                            for s_i in a_sp..=b_sp.min(l - 1) {
+                                row[s_i] = 15;
+                            }
+                            masked_any = true;
+                        }
+                    }
+                }
+                if masked_any {
+                    let (adj_re, branches_re, _, _) = self.contract_unsupported_edges_mdl(
+                        adj,
+                        &masked_bitmasks,
+                        &majority_state,
+                        &terminal_loads,
+                        n,
+                        l,
+                        l_eff,
+                        ti_cost,
+                        tv_cost,
+                        &tree_weights,
+                        &mut full_labels,
+                        false,
+                        None,
+                        true,
+                    );
+                    adj = adj_re;
+                    branches = branches_re;
+                }
+            }
+        }
+
+        let raw_nats = (n as f64) * l_eff * 4.0_f64.ln();
+        let star_nats = self.compute_star_tree_mdl_nats(&bitmasks, n, l, l_eff);
+        let backbone_nats = self.compute_tree_total_mdl_nats(&adj, &branches, l_eff);
+        let shunt_gain_total: f64 = shunts.iter().map(|s| s.net_mdl_gain_nats).sum();
+        let full_graph_nats = (l_eff * 4.0_f64.ln()).max(backbone_nats - shunt_gain_total);
+
+        let mut polytomy_degrees = Vec::new();
+        for (&u, nbs) in &adj {
+            if u >= n && nbs.len() > 3 {
+                polytomy_degrees.push(nbs.len());
+            }
+        }
+        let n_internal_branches = branches.iter().filter(|b| b.is_internal).count();
+        let max_binary_internal_branches = n.saturating_sub(3);
+        let max_polytomy_degree = polytomy_degrees
+            .iter()
+            .copied()
+            .max()
+            .unwrap_or(if n >= 3 { 3 } else { n });
+
+        let newick = self.serialize_newick(&adj, names, &branches, n);
+        #[cfg(not(target_arch = "wasm32"))]
+        let runtime_sec = t0.elapsed().as_secs_f64();
+        #[cfg(target_arch = "wasm32")]
+        let runtime_sec = 0.0;
+
+        Ok(BushwhackerResult {
+            names: names.to_vec(),
+            n_taxa: n,
+            n_sites: l,
+            l_eff,
+            newick,
+            binary_newick,
+            adjacency: adj,
+            node_labels: full_labels,
+            branches,
+            shunts,
+            n_internal_branches,
+            max_binary_internal_branches,
+            polytomy_nodes: polytomy_degrees.len(),
+            max_polytomy_degree,
+            raw_uncompressed_nats: raw_nats,
+            star_tree_nats: star_nats,
+            backbone_tree_nats: backbone_nats,
+            full_graph_nats,
+            runtime_sec,
+            site_weights: tree_weights,
+            terminal_loads,
+        })
     }
 }
 
@@ -7625,8 +9448,258 @@ pub fn decompress_alignment_from_bwz(
 }
 
 // ---------------------------------------------------------------------------
-// WebAssembly Bindings (wasm32-unknown-unknown)
+// Unified Multi-Alphabet Dispatch & WebAssembly Bindings (wasm32-unknown-unknown)
 // ---------------------------------------------------------------------------
+
+fn looks_like_csv_or_tsv_matrix(text: &str) -> bool {
+    let Some(first) = text
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty() && (!l.starts_with('#') || l.eq_ignore_ascii_case("#nexus")))
+    else {
+        return false;
+    };
+    if first.starts_with('>')
+        || first.starts_with(';')
+        || first.starts_with('(')
+        || first.eq_ignore_ascii_case("#nexus")
+    {
+        return false;
+    }
+    // Exclude PHYLIP header "N L"
+    let mut sp = first.split_whitespace();
+    if let (Some(a), Some(b), None) = (sp.next(), sp.next(), sp.next()) {
+        if a.chars().all(|c| c.is_ascii_digit()) && b.chars().all(|c| c.is_ascii_digit()) {
+            return false;
+        }
+    }
+    first.contains(',') || first.contains('\t')
+}
+
+fn detect_sequence_alphabet_kind(seqs: &[String]) -> &'static str {
+    let mut digits_01 = 0usize;
+    let mut digits_2_9 = 0usize;
+    let mut letters_non_nx = 0usize;
+    for s in seqs.iter().take(128) {
+        for &b in s.as_bytes().iter().take(4096) {
+            let up = b.to_ascii_uppercase();
+            if matches!(up, b'-' | b'?' | b'.' | b'*') {
+                continue;
+            }
+            if matches!(up, b'0' | b'1') {
+                digits_01 += 1;
+            } else if up.is_ascii_digit() {
+                digits_2_9 += 1;
+            } else if up.is_ascii_alphabetic() && up != b'N' && up != b'X' {
+                letters_non_nx += 1;
+            }
+        }
+    }
+    if digits_01 > 0 && digits_2_9 == 0 && letters_non_nx == 0 {
+        "binary"
+    } else if (digits_01 + digits_2_9) > 0 && letters_non_nx == 0 {
+        "ordered"
+    } else if protein::is_protein_alignment(seqs) {
+        "protein"
+    } else {
+        "nucleotide"
+    }
+}
+
+fn discrete_matrix_to_symbol_seqs(cm: &discrete::DiscreteCharacterMatrix) -> Vec<String> {
+    let mut seqs = Vec::with_capacity(cm.n_taxa);
+    for i in 0..cm.n_taxa {
+        let off = i * cm.n_sites;
+        let mut row = Vec::with_capacity(cm.n_sites);
+        for j in 0..cm.n_sites {
+            let st = cm.mat[off + j];
+            let ch = if st < 0 {
+                b'?'
+            } else if st < 10 {
+                b'0' + (st as u8)
+            } else if st < 32 {
+                b'A' + ((st - 10) as u8)
+            } else {
+                b'V'
+            };
+            row.push(ch);
+        }
+        seqs.push(String::from_utf8(row).unwrap_or_default());
+    }
+    seqs
+}
+
+/// Induce an MDL phylogenetic graph across any supported data modality (`auto`, `nucleotide`,
+/// `protein`, `translate`, `binary`, `discrete`, `ordered`) from FASTA, PHYLIP, NEXUS, CSV, or TSV
+/// text and return a JSON-serialized `BushwhackerResult` enriched with alphabet metadata.
+pub fn infer_any_alignment_json(
+    input_text: &str,
+    data_mode: &str,
+    coding_aware: bool,
+    detect_shunts: bool,
+    min_shunt_sites: usize,
+) -> Result<String, String> {
+    let mode_norm = data_mode.trim().to_ascii_lowercase();
+    let engine = BushwhackerEngine::new(coding_aware, detect_shunts, min_shunt_sites.max(1));
+
+    let (res, alphabet_mode, k_states, feature_names): (
+        BushwhackerResult,
+        &'static str,
+        usize,
+        Vec<String>,
+    ) = match mode_norm.as_str() {
+        "binary" => {
+            let cm = discrete::parse_discrete_str(input_text)?;
+            let r = discrete::infer_discrete_mdl(
+                &engine,
+                &cm,
+                discrete::DiscreteMode::Unordered,
+                None,
+            )?;
+            (r, "binary", cm.k_states.max(2), cm.feature_names)
+        }
+        "discrete" | "unordered" => {
+            let cm = discrete::parse_discrete_str(input_text)?;
+            let r = discrete::infer_discrete_mdl(
+                &engine,
+                &cm,
+                discrete::DiscreteMode::Unordered,
+                None,
+            )?;
+            (r, "discrete", cm.k_states, cm.feature_names)
+        }
+        "ordered" | "cna" => {
+            let cm = discrete::parse_discrete_str(input_text)?;
+            let r = discrete::infer_discrete_mdl(
+                &engine,
+                &cm,
+                discrete::DiscreteMode::Ordered,
+                None,
+            )?;
+            (r, "ordered", cm.k_states, cm.feature_names)
+        }
+        "protein" | "aa" => {
+            let (names, seqs) = parse_alignment_str(input_text)?;
+            let r = protein::infer_protein_mdl(&engine, &names, &seqs, None)?;
+            (r, "protein", 20, Vec::new())
+        }
+        "translate" | "codon_translate" => {
+            let (names, seqs) = parse_alignment_str(input_text)?;
+            let r = if protein::is_protein_alignment(&seqs) {
+                protein::infer_protein_mdl(&engine, &names, &seqs, None)?
+            } else {
+                let aa_seqs = protein::translate_coding_alignment(&seqs)?;
+                protein::infer_protein_mdl(&engine, &names, &aa_seqs, None)?
+            };
+            (r, "translate", 20, Vec::new())
+        }
+        "nucleotide" | "dna" | "rna" => {
+            let (names, seqs) = parse_alignment_str(input_text)?;
+            let r = engine.infer(&names, &seqs)?;
+            (r, "nucleotide", 4, Vec::new())
+        }
+        _ => {
+            // Auto-detect CSV/TSV character matrix vs FASTA/PHYLIP/NEXUS alignment
+            if looks_like_csv_or_tsv_matrix(input_text) {
+                let cm = discrete::parse_discrete_str(input_text)?;
+                if cm.k_states <= 2 {
+                    let r = discrete::infer_discrete_mdl(
+                        &engine,
+                        &cm,
+                        discrete::DiscreteMode::Unordered,
+                        None,
+                    )?;
+                    (r, "binary", 2, cm.feature_names)
+                } else {
+                    let r = discrete::infer_discrete_mdl(
+                        &engine,
+                        &cm,
+                        discrete::DiscreteMode::Ordered,
+                        None,
+                    )?;
+                    (r, "ordered", cm.k_states, cm.feature_names)
+                }
+            } else {
+                let (names, seqs) = parse_alignment_str(input_text)?;
+                match detect_sequence_alphabet_kind(&seqs) {
+                    "binary" => {
+                        let cm = discrete::encode_discrete_sequences(&names, &seqs)?;
+                        let r = discrete::infer_discrete_mdl(
+                            &engine,
+                            &cm,
+                            discrete::DiscreteMode::Unordered,
+                            None,
+                        )?;
+                        (r, "binary", 2, cm.feature_names)
+                    }
+                    "ordered" => {
+                        let cm = discrete::encode_discrete_sequences(&names, &seqs)?;
+                        let r = discrete::infer_discrete_mdl(
+                            &engine,
+                            &cm,
+                            discrete::DiscreteMode::Ordered,
+                            None,
+                        )?;
+                        (r, "ordered", cm.k_states, cm.feature_names)
+                    }
+                    "protein" => {
+                        let r = protein::infer_protein_mdl(&engine, &names, &seqs, None)?;
+                        (r, "protein", 20, Vec::new())
+                    }
+                    _ => {
+                        let r = engine.infer(&names, &seqs)?;
+                        (r, "nucleotide", 4, Vec::new())
+                    }
+                }
+            }
+        }
+    };
+
+    let mut val = serde_json::to_value(&res).map_err(|e| e.to_string())?;
+    if let Some(obj) = val.as_object_mut() {
+        obj.insert(
+            "alphabet_mode".to_string(),
+            serde_json::Value::String(alphabet_mode.to_string()),
+        );
+        obj.insert(
+            "k_states".to_string(),
+            serde_json::Value::Number(serde_json::Number::from(k_states)),
+        );
+        if !feature_names.is_empty() {
+            obj.insert(
+                "feature_names".to_string(),
+                serde_json::to_value(&feature_names).unwrap_or(serde_json::Value::Null),
+            );
+        }
+    }
+    serde_json::to_string(&val).map_err(|e| e.to_string())
+}
+
+/// Compress any supported alignment or discrete/binary character matrix (`input_text`) and its
+/// JSON-serialized `BushwhackerResult` into a bit-for-bit lossless `.bwz` binary archive.
+pub fn compress_any_alignment_to_bwz(
+    input_text: &str,
+    result_json: &str,
+) -> Result<Vec<u8>, String> {
+    let res: BushwhackerResult = serde_json::from_str(result_json)
+        .map_err(|e| format!("Invalid BushwhackerResult JSON: {e}"))?;
+    let (names, seqs) = if looks_like_csv_or_tsv_matrix(input_text) {
+        let cm = discrete::parse_discrete_str(input_text)?;
+        let sqs = discrete_matrix_to_symbol_seqs(&cm);
+        (cm.names, sqs)
+    } else {
+        match parse_alignment_str(input_text) {
+            Ok(pair) => pair,
+            Err(_) => {
+                let cm = discrete::parse_discrete_str(input_text)?;
+                let sqs = discrete_matrix_to_symbol_seqs(&cm);
+                (cm.names, sqs)
+            }
+        }
+    };
+    let (bytes, _stats) = compress_alignment_to_bwz(&names, &seqs, &res)?;
+    Ok(bytes)
+}
 
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
@@ -7640,8 +9713,28 @@ impl WasmBushwhacker {
         Self
     }
 
-    /// Induce an MDL phylogenetic graph from a FASTA/PHYLIP/NEXUS alignment string and return
-    /// a JSON-serialized `BushwhackerResult`.
+    /// Induce an MDL phylogenetic graph with explicit or auto-detected data modality
+    /// (`auto`, `nucleotide`, `protein`, `translate`, `binary`, `discrete`, `ordered`).
+    pub fn infer_alignment(
+        &self,
+        input_text: &str,
+        data_mode: &str,
+        coding_aware: bool,
+        detect_shunts: bool,
+        min_shunt_sites: usize,
+    ) -> Result<String, JsValue> {
+        infer_any_alignment_json(
+            input_text,
+            data_mode,
+            coding_aware,
+            detect_shunts,
+            min_shunt_sites,
+        )
+        .map_err(|e| JsValue::from_str(&e))
+    }
+
+    /// Backwards-compatible entrypoint that auto-detects Nucleotide, Protein, Binary (`0/1`),
+    /// or Discrete/Ordered CSV/TSV matrices.
     pub fn infer_fasta(
         &self,
         fasta_text: &str,
@@ -7649,33 +9742,24 @@ impl WasmBushwhacker {
         detect_shunts: bool,
         min_shunt_sites: usize,
     ) -> Result<String, JsValue> {
-        let (names, seqs) =
-            parse_fasta_str(fasta_text).map_err(|e| JsValue::from_str(&e))?;
-        let engine = BushwhackerEngine::new(
+        infer_any_alignment_json(
+            fasta_text,
+            "auto",
             coding_aware,
             detect_shunts,
             min_shunt_sites.max(2),
-        );
-        let res = engine
-            .infer(&names, &seqs)
-            .map_err(|e| JsValue::from_str(&e))?;
-        serde_json::to_string(&res).map_err(|e| JsValue::from_str(&e.to_string()))
+        )
+        .map_err(|e| JsValue::from_str(&e))
     }
 
-    /// Compress an alignment (`fasta_text`) and its JSON-serialized `BushwhackerResult`
-    /// into a self-contained, bit-for-bit lossless `.bwz` binary archive.
+    /// Compress an alignment or character matrix (`fasta_text`) and its JSON-serialized
+    /// `BushwhackerResult` into a self-contained, bit-for-bit lossless `.bwz` binary archive.
     pub fn compress_bwz(
         &self,
         fasta_text: &str,
         result_json: &str,
     ) -> Result<Vec<u8>, JsValue> {
-        let (names, seqs) =
-            parse_fasta_str(fasta_text).map_err(|e| JsValue::from_str(&e))?;
-        let res: BushwhackerResult = serde_json::from_str(result_json)
-            .map_err(|e| JsValue::from_str(&format!("Invalid BushwhackerResult JSON: {e}")))?;
-        let (bytes, _stats) = compress_alignment_to_bwz(&names, &seqs, &res)
-            .map_err(|e| JsValue::from_str(&e))?;
-        Ok(bytes)
+        compress_any_alignment_to_bwz(fasta_text, result_json).map_err(|e| JsValue::from_str(&e))
     }
 
     /// Decompress a `.bwz` binary archive back into a JSON object `{ fasta, newick, n_taxa, n_sites }`.
@@ -7869,6 +9953,300 @@ TGCATGCANNNTGCATGCTTGCATGCAT
         assert_eq!(names, dec_names);
         assert_eq!(seqs, dec_seqs);
         assert_eq!(res.newick, dec_nwk);
+    }
+
+    #[test]
+    fn test_protein_auto_detection_and_bwz_roundtrip() {
+        let aa_fasta = "\
+>Bat_1
+MVLSPADKTNVKAAWGKVGAHAGEYGAEALERMFLSFPTTKTYFPHFDLSHGSAQVKGHG
+>Bat_2
+MVLSPADKTNVKAAWGKVGAHAGEYGAEALERMFLSFPTTKTYFPHFDLSHGSAQVKGHG
+>Dolphin_1
+MVLSPAEKTNVKAAWGKVGGHAGEYGAEALERMFLGFPTTKTYFPHFDLSHGSAQVKAHG
+>Dolphin_2
+MVLSPAEKTNVKAAWGKVGGHAGEYGAEALERMFLGFPTTKTYFPHFDLSHGSAQVKAHG
+>Outgroup
+MVLSAADKNNVKGIFTKIAGHAEEYGAETLERMFTTYPPTKTYFPHFDLSHGSAQIKAHG
+";
+        let (names, seqs) = parse_fasta_str(aa_fasta).unwrap();
+        assert!(protein::is_protein_alignment(&seqs));
+        let engine = BushwhackerEngine::default();
+        let res = engine.infer(&names, &seqs).unwrap();
+        assert!(res.n_internal_branches >= 1);
+        let (bwz_bytes, _) = compress_alignment_to_bwz(&names, &seqs, &res).unwrap();
+        let (dec_names, dec_seqs, _) = decompress_alignment_from_bwz(&bwz_bytes).unwrap();
+        assert_eq!(names, dec_names);
+        assert_eq!(seqs, dec_seqs);
+    }
+
+    #[test]
+    fn test_multithreaded_bit_exact_determinism() {
+        let n_taxa = 560usize;
+        let l_codons = 60usize;
+        let codons = [b"ATG", b"GCT", b"TTC", b"CAG", b"GAC", b"AAG", b"GTG", b"TGG"];
+        let mut names = Vec::with_capacity(n_taxa);
+        let mut seqs = Vec::with_capacity(n_taxa);
+        for i in 0..n_taxa {
+            names.push(format!("Taxon_{:04}", i));
+            let clade = i / 35;
+            let subclade = (i % 35) / 7;
+            let mut s = String::with_capacity(l_codons * 3);
+            for c in 0..l_codons {
+                let mut idx = (c * 3 + (clade & 3)) & 7;
+                if c >= 10 && c < 20 && subclade >= 2 {
+                    idx = (idx + subclade) & 7;
+                }
+                if c >= 45 && c < 50 && (clade == 2 || clade == 11) {
+                    idx = 7;
+                }
+                if c == (i % l_codons) {
+                    idx = (idx + 1) & 7;
+                }
+                s.push_str(std::str::from_utf8(codons[idx]).unwrap());
+            }
+            seqs.push(s);
+        }
+
+        let pool1 = rayon::ThreadPoolBuilder::new().num_threads(1).build().unwrap();
+        let pool8 = rayon::ThreadPoolBuilder::new().num_threads(8).build().unwrap();
+
+        let engine_nt = BushwhackerEngine::default();
+        let res_nt_1 = pool1.install(|| engine_nt.infer(&names, &seqs).unwrap());
+        let res_nt_8 = pool8.install(|| engine_nt.infer(&names, &seqs).unwrap());
+        assert_eq!(res_nt_1.newick, res_nt_8.newick);
+        assert_eq!(res_nt_1.binary_newick, res_nt_8.binary_newick);
+        assert_eq!(res_nt_1.backbone_tree_nats.to_bits(), res_nt_8.backbone_tree_nats.to_bits());
+        assert_eq!(res_nt_1.full_graph_nats.to_bits(), res_nt_8.full_graph_nats.to_bits());
+        assert_eq!(res_nt_1.shunts.len(), res_nt_8.shunts.len());
+
+        let mut engine_aa = BushwhackerEngine::default();
+        engine_aa.translate_coding = true;
+        let res_aa_1 = pool1.install(|| engine_aa.infer(&names, &seqs).unwrap());
+        let res_aa_8 = pool8.install(|| engine_aa.infer(&names, &seqs).unwrap());
+        assert_eq!(res_aa_1.newick, res_aa_8.newick);
+        assert_eq!(res_aa_1.binary_newick, res_aa_8.binary_newick);
+        assert_eq!(res_aa_1.backbone_tree_nats.to_bits(), res_aa_8.backbone_tree_nats.to_bits());
+        assert_eq!(res_aa_1.full_graph_nats.to_bits(), res_aa_8.full_graph_nats.to_bits());
+        assert_eq!(res_aa_1.shunts.len(), res_aa_8.shunts.len());
+    }
+
+    #[test]
+    fn test_protein_lg08_kraft_normalization() {
+        let costs = protein::estimate_aa_subst_costs(&[], 0, 0);
+        for a in 0..20 {
+            assert_eq!(costs[a][a], 0.0);
+            let kraft_sum: f64 = (0..20)
+                .filter(|&b| b != a)
+                .map(|b| (-costs[a][b]).exp())
+                .sum();
+            assert!(
+                (kraft_sum - 1.0).abs() < 1e-12,
+                "Kraft sum for AA {} = {}",
+                a,
+                kraft_sum
+            );
+        }
+        // Alphabetical order: A=0,C=1,D=2,E=3,F=4,G=5,H=6,I=7,K=8,L=9,M=10,N=11,P=12,Q=13,R=14,S=15,T=16,V=17,W=18,Y=19
+        assert!(costs[7][17] < costs[7][2]); // I->V cheaper than I->D
+        assert!(costs[8][14] < costs[8][18]); // K->R cheaper than K->W
+        assert!(costs[4][19] < costs[4][12]); // F->Y cheaper than F->P
+    }
+
+    #[test]
+    fn test_protein_star_radiation_contracts_to_zero_splits() {
+        let base_motif = b"MVLSPADKTNVKAAWGKVGAHAGEYGAEALERMFLSFPTTKTYFPHFDLS"; // 50 AA
+        let l = 1000usize;
+        let aa_alphabet = b"ACDEFGHIKLMNPQRSTVWY";
+        let costs = protein::estimate_aa_subst_costs(&[], 0, 0);
+        let mut names = Vec::new();
+        let mut seqs = Vec::new();
+        let mut rng_state = 0x9E37_79B9_7F4A_7C15_u64;
+        let mut next_f64 = || -> f64 {
+            rng_state ^= rng_state >> 12;
+            rng_state ^= rng_state << 25;
+            rng_state ^= rng_state >> 27;
+            let u = rng_state.wrapping_mul(0x2545_F491_4F6C_DD1D);
+            ((u >> 11) as f64) * (1.0 / ((1u64 << 53) as f64))
+        };
+        for i in 0..16usize {
+            names.push(format!("StarAA_{:02}", i));
+            let mut row: Vec<u8> = (0..l).map(|s| base_motif[s % base_motif.len()]).collect();
+            for s in 0..l {
+                if next_f64() < 0.20 {
+                    let a = aa_alphabet.iter().position(|&c| c == row[s]).unwrap();
+                    let u = next_f64();
+                    let mut cum = 0.0_f64;
+                    let mut chosen = a;
+                    for b in 0..20 {
+                        if b != a {
+                            cum += (-costs[a][b]).exp();
+                            if u <= cum {
+                                chosen = b;
+                                break;
+                            }
+                        }
+                    }
+                    row[s] = aa_alphabet[chosen];
+                }
+            }
+            seqs.push(String::from_utf8(row).unwrap());
+        }
+        let mut engine = BushwhackerEngine::default();
+        engine.force_protein = true;
+        engine.detect_shunts = false;
+        let res = engine.infer(&names, &seqs).unwrap();
+        assert_eq!(
+            res.n_internal_branches, 0,
+            "Expected 0 internal branches on LG08 20-state star radiation, got {} (nwk={})",
+            res.n_internal_branches,
+            res.newick
+        );
+    }
+
+    #[test]
+    fn test_protein_deep_biochemical_clades_resolve() {
+        // 8 taxa: Clade A (0..4) vs Clade B (4..8) across 800 AA where diagnostic sites
+        // exhibit within-class terminal divergence (I vs V in Clade A; K vs R in Clade B),
+        // so unweighted 4-taxon Fitch steps tie (3 vs 3) while LG08 exchangeabilities resolve A|B.
+        let l = 800usize;
+        let bg = b"MGLSDGEWQLVLNVWGKVEADIPGHGQEVLIRLFKGHPETLEKFDKFKHL";
+        let mut names = Vec::new();
+        let mut seqs = Vec::new();
+        for i in 0..8usize {
+            names.push(format!("Clade{}_{}", if i < 4 { "A" } else { "B" }, i % 4));
+            let mut row: Vec<u8> = (0..l).map(|s| bg[s % bg.len()]).collect();
+            for s in (0..l).step_by(5) {
+                row[s] = match (i < 4, i % 2 == 0) {
+                    (true, true) => b'I',
+                    (true, false) => b'V',
+                    (false, true) => b'K',
+                    (false, false) => b'R',
+                };
+            }
+            // Add independent leaf-specific noise at non-diagnostic sites
+            for s in 0..l {
+                if s % 5 != 0 && ((s * 13 + i * 37) % 11 == 0) {
+                    let noise_aa = b"ADEFGHLMNPQSTWY"[(s + i * 3) % 15];
+                    row[s] = noise_aa;
+                }
+            }
+            seqs.push(String::from_utf8(row).unwrap());
+        }
+        let mut engine = BushwhackerEngine::default();
+        engine.force_protein = true;
+        engine.detect_shunts = false;
+        let res = engine.infer(&names, &seqs).unwrap();
+        assert!(
+            res.n_internal_branches >= 1,
+            "Expected biochemical split A|B to resolve, got {} internal branches (nwk={})",
+            res.n_internal_branches,
+            res.newick
+        );
+    }
+
+    #[test]
+    fn test_nt_gtr_eigendecomposition_and_reversibility() {
+        let fasta = "\
+>Sp1
+ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT
+>Sp2
+ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGA
+>Sp3
+TGCATGCATGCATGCATGCATGCATGCATGCATGCATGCA
+>Sp4
+TGCATGCATGCATGCATGCATGCATGCATGCATGCATGCT
+";
+        let (_, seqs) = parse_fasta_str(fasta).unwrap();
+        let (mat, _, _, _, l) = encode_nucleotide_alignment(&seqs);
+        let gtr = nt_gtr::estimate_empirical_gtr_eigensystem(&mat, seqs.len(), l);
+        let pi_sum: f64 = gtr.pi.iter().sum();
+        assert!((pi_sum - 1.0).abs() < 1e-12);
+        assert_eq!(gtr.evals[0], 0.0);
+        for &ev in &gtr.evals[1..] {
+            assert!(ev < -1e-4, "Non-stationary GTR eigenvalue must be negative, got {ev}");
+        }
+        let p0 = gtr.trans_mat4(0.0);
+        let pt = gtr.trans_mat4(0.35);
+        for a in 0..4 {
+            let mut row_s = 0.0_f64;
+            for b in 0..4 {
+                let target0 = if a == b { 1.0 } else { 0.0 };
+                assert!((p0[a][b] as f64 - target0).abs() < 1e-5);
+                row_s += pt[a][b] as f64;
+                // Detailed balance: pi[a] * P(t)[a][b] == pi[b] * P(t)[b][a]
+                let lhs = gtr.pi[a] * (pt[a][b] as f64);
+                let rhs = gtr.pi[b] * (pt[b][a] as f64);
+                assert!(
+                    (lhs - rhs).abs() < 1e-5,
+                    "Detailed balance violated for ({a},{b}): {lhs} vs {rhs}"
+                );
+            }
+            assert!((row_s - 1.0).abs() < 1e-5);
+        }
+    }
+
+    #[test]
+    fn test_unified_multi_alphabet_dispatch_and_bwz_roundtrip() {
+        // 1. Protein auto-detection & lossless .bwz roundtrip (including Asparagine 'N' and gaps '-')
+        let prot_fasta = "\
+>TaxA1
+MGLSDGEWQLVLNVWGKVEADIPGHGQEVLIRLFKGHPETLEKFDKFKHLKSEDEMKASE
+>TaxA2
+MGLSDGEWQLVLNVWGKVEADIPGHGQEVLIRLFKGHPETLEKFDKFKHLKSEDEMKASD
+>TaxB1
+MGLSDGEWQLVLNVWGKVEADIPGHGQEVLIRLFKGHPEVLEKFDKFKHLKSEDEMKA--
+>TaxB2
+MGLSDGEWQLVLNVWGKVEADIPGHGQEVLIRLFKGHPEVLEKFDKFKHLKSEDEMKANN
+";
+        let prot_json = infer_any_alignment_json(prot_fasta, "auto", true, true, 2).unwrap();
+        let prot_val: serde_json::Value = serde_json::from_str(&prot_json).unwrap();
+        assert_eq!(prot_val["alphabet_mode"], "protein");
+        assert_eq!(prot_val["k_states"], 20);
+        let bwz_prot = compress_any_alignment_to_bwz(prot_fasta, &prot_json).unwrap();
+        let (dec_names, dec_seqs, _) = decompress_alignment_from_bwz(&bwz_prot).unwrap();
+        let (orig_names, orig_seqs) = parse_alignment_str(prot_fasta).unwrap();
+        assert_eq!(dec_names, orig_names);
+        assert_eq!(dec_seqs, orig_seqs);
+
+        // 2. Codon translation ("translate") mode
+        let cds_fasta = "\
+>SpA1
+ATGGTGCTGTCTGATGGGGAGTGGCAGCTGGTCTTGAATGTCTGGGGGAAGGTGGAGGCC
+>SpA2
+ATGGTGCTGTCTGATGGGGAGTGGCAGCTGGTCTTGAATGTCTGGGGGAAGGTGGAGGCT
+>SpB1
+ATGGTGCTGTCTGATGGGGAGTGGCAGCTGATCTTGAATGTCTGGGGGAAGATAGAGGCC
+>SpB2
+ATGGTGCTGTCTGATGGGGAGTGGCAGCTGATCTTGAATGTCTGGGGGAAGATAGAGGCA
+";
+        let tr_json = infer_any_alignment_json(cds_fasta, "translate", true, false, 2).unwrap();
+        let tr_val: serde_json::Value = serde_json::from_str(&tr_json).unwrap();
+        assert_eq!(tr_val["alphabet_mode"], "translate");
+        assert_eq!(tr_val["n_sites"], 20);
+        let bwz_tr = compress_any_alignment_to_bwz(cds_fasta, &tr_json).unwrap();
+        let (_, dec_cds, _) = decompress_alignment_from_bwz(&bwz_tr).unwrap();
+        let (_, orig_cds) = parse_alignment_str(cds_fasta).unwrap();
+        assert_eq!(dec_cds, orig_cds);
+
+        // 3. Binary 0/1 FASTA & CSV auto-detection + lossless .bwz roundtrip
+        let bin_csv = "\
+clone,DNMT3A,NPM1,FLT3,NRAS,TET2,SRSF2,IDH2,WT1
+WT_Root,0,0,0,0,0,0,0,0
+Clone_A1,1,1,1,0,0,0,0,0
+Clone_A2,1,1,1,0,0,0,0,1
+Clone_B1,0,0,0,1,1,1,0,0
+Clone_B2,0,0,0,1,1,1,1,?
+";
+        let bin_json = infer_any_alignment_json(bin_csv, "auto", false, true, 2).unwrap();
+        let bin_val: serde_json::Value = serde_json::from_str(&bin_json).unwrap();
+        assert_eq!(bin_val["alphabet_mode"], "binary");
+        assert_eq!(bin_val["k_states"], 2);
+        assert_eq!(bin_val["feature_names"][0], "DNMT3A");
+        let bwz_bin = compress_any_alignment_to_bwz(bin_csv, &bin_json).unwrap();
+        let (dec_bnames, dec_bseqs, _) = decompress_alignment_from_bwz(&bwz_bin).unwrap();
+        assert_eq!(dec_bnames.len(), 5);
+        assert_eq!(dec_bseqs[4], "0001111?");
     }
 }
 

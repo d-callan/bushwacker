@@ -12,8 +12,8 @@ export class WasmBushwhacker {
         wasm.__wbg_wasmbushwhacker_free(ptr, 0);
     }
     /**
-     * Compress an alignment (`fasta_text`) and its JSON-serialized `BushwhackerResult`
-     * into a self-contained, bit-for-bit lossless `.bwz` binary archive.
+     * Compress an alignment or character matrix (`fasta_text`) and its JSON-serialized
+     * `BushwhackerResult` into a self-contained, bit-for-bit lossless `.bwz` binary archive.
      * @param {string} fasta_text
      * @param {string} result_json
      * @returns {Uint8Array}
@@ -64,8 +64,50 @@ export class WasmBushwhacker {
         }
     }
     /**
-     * Induce an MDL phylogenetic graph from a FASTA/PHYLIP/NEXUS alignment string and return
-     * a JSON-serialized `BushwhackerResult`.
+     * Induce an MDL phylogenetic graph with explicit or auto-detected data modality
+     * (`auto`, `nucleotide`, `protein`, `translate`, `binary`, `discrete`, `ordered`).
+     * @param {string} input_text
+     * @param {string} data_mode
+     * @param {boolean} coding_aware
+     * @param {boolean} detect_shunts
+     * @param {number} min_shunt_sites
+     * @returns {string}
+     */
+    infer_alignment(input_text, data_mode, coding_aware, detect_shunts, min_shunt_sites) {
+        let deferred7_0;
+        let deferred7_1;
+        try {
+            const val3 = +coding_aware;
+            const val4 = +detect_shunts;
+            const val5 = +min_shunt_sites;
+            let ptr0, len0, ptr1, len1;
+            try {
+                ptr0 = passStringToWasm0(input_text, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+                len0 = WASM_VECTOR_LEN;
+                ptr1 = passStringToWasm0(data_mode, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+                len1 = WASM_VECTOR_LEN;
+            } catch (e) {
+                if (ptr1) { wasm.__wbindgen_free(ptr1, len1 * 1, 1); }
+                if (ptr0) { wasm.__wbindgen_free(ptr0, len0 * 1, 1); }
+                throw e;
+            }
+            const ret = wasm.wasmbushwhacker_infer_alignment(this.__wbg_ptr, ptr0, len0, ptr1, len1, val3, val4, val5);
+            var ptr6 = ret[0];
+            var len6 = ret[1];
+            if (ret[3]) {
+                ptr6 = 0; len6 = 0;
+                throw takeFromExternrefTable0(ret[2]);
+            }
+            deferred7_0 = ptr6;
+            deferred7_1 = len6;
+            return getStringFromWasm0(ptr6, len6);
+        } finally {
+            wasm.__wbindgen_free(deferred7_0, deferred7_1, 1);
+        }
+    }
+    /**
+     * Backwards-compatible entrypoint that auto-detects Nucleotide, Protein, Binary (`0/1`),
+     * or Discrete/Ordered CSV/TSV matrices.
      * @param {string} fasta_text
      * @param {boolean} coding_aware
      * @param {boolean} detect_shunts

@@ -1342,9 +1342,9 @@
     </nav>
 
     <div class="topbar-actions">
-      <input type="file" id="fileInput" accept=".fa,.fasta,.fna,.cds,.phy,.phylip,.nex,.nexus,.nwk,.newick,.tre,.txt,.json,.bwz" style="display:none" onchange="handleFileUpload(event)" />
-      <button class="btn btn-sm" onclick="document.getElementById('fileInput').click()" title="Upload FASTA, PHYLIP, NEXUS, Newick, JSON, or lossless .bwz archive">Upload</button>
-      <button class="btn btn-sm" onclick="openPasteModal()" title="Paste raw FASTA, PHYLIP, NEXUS, or Newick tree">Paste</button>
+      <input type="file" id="fileInput" accept=".fa,.fasta,.faa,.fna,.cds,.phy,.phylip,.nex,.nexus,.csv,.tsv,.nwk,.newick,.tre,.txt,.json,.bwz" style="display:none" onchange="handleFileUpload(event)" />
+      <button class="btn btn-sm" onclick="document.getElementById('fileInput').click()" title="Upload DNA, Protein, or Binary/Discrete alignment (FASTA, FAA, PHYLIP, NEXUS, CSV/TSV), Newick, JSON, or .bwz">Upload</button>
+      <button class="btn btn-sm" onclick="openPasteModal()" title="Paste DNA, Protein, or Binary/Discrete FASTA/PHYLIP/NEXUS/CSV, or Newick tree">Paste</button>
       <button class="btn btn-sm" onclick="openStreamModal()" title="Stream live orthologs from NCBI Entrez, ENA, or HTTPS URL">🌐 Fetch</button>
       <button id="btnTopWalkthrough" class="btn btn-sm" onclick="toggleWalkthroughTour()" title="Interactive Step-by-Step Guided Walkthrough">🎓 Tour</button>
       <button class="btn btn-sm" onclick="openHelpDrawer()" title="How BUSHWHACKER Works, MDL Math &amp; FAQ">? Guide</button>
@@ -1394,7 +1394,7 @@
               Parameter-Free Phylogenetics, Polytomy Calibration &amp; Shunt Discovery via MDL
             </h1>
             <p class="landing-lead">
-              Drop any multiple sequence alignment (<code>FASTA</code>, <code>PHYLIP</code>, <code>NEXUS</code>), <code>Newick</code> tree, or lossless <code>.bwz</code> archive. BUSHWHACKER replaces continuous branch-length priors with exact combinadic prefix codes — automatically contracting unsupported splits into calibrated polytomies and peeling convergent or horizontal gene transfer shunts 100% locally in your browser.
+              Drop any <strong>DNA/RNA</strong>, <strong>20-state Protein</strong>, or <strong>Binary / Discrete / Copy-Number</strong> character matrix (<code>FASTA</code>, <code>FAA</code>, <code>PHYLIP</code>, <code>NEXUS</code>, <code>CSV/TSV</code>), <code>Newick</code> tree, or lossless <code>.bwz</code> archive. BUSHWHACKER replaces continuous branch-length priors with exact combinadic prefix codes — automatically contracting unsupported splits into calibrated polytomies and peeling convergent or horizontal gene transfer shunts 100% locally in your browser.
             </p>
           </div>
 
@@ -1427,10 +1427,10 @@
           <div class="dropzone-icon">↑</div>
           <div>
             <div style="font-size:15px; font-weight:700; color:var(--ink); margin-bottom:4px;">
-              Drop Alignment, Newick, or .bwz Archive
+              Drop DNA, Protein, Binary/CSV Matrix, Newick, or .bwz
             </div>
-            <div style="font-size:12.5px; color:var(--ink-muted); max-width:340px;">
-              Accepts <code>.fasta</code>, <code>.phy</code>, <code>.nex</code>, <code>.nwk</code>, <code>.json</code> MDL audits, or lossless <code>.bwz</code> archives
+            <div style="font-size:12.5px; color:var(--ink-muted); max-width:360px;">
+              Accepts <code>.fasta</code>, <code>.faa</code>, <code>.phy</code>, <code>.nex</code>, <code>.csv/.tsv</code> (`0/1` or `K`-state), <code>.nwk</code>, <code>.json</code>, or lossless <code>.bwz</code>
             </div>
           </div>
           <div style="display:flex; gap:8px; margin-top:4px; flex-wrap:wrap; justify-content:center;" onclick="event.stopPropagation()">
@@ -1529,16 +1529,28 @@
           </div>
           <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
             <label style="display:inline-flex; align-items:center; gap:6px; font-size:12.5px; font-weight:600; color:var(--ink-secondary);">
-              <span>Coding 3rd-Pos Weighting:</span>
+              <span>Alphabet / Model:</span>
+              <select id="s0DataModeSelect" class="clean-select" style="padding:4px 8px; font-size:12.5px; font-weight:600;" onchange="onStage0SettingChange()">
+                <option value="auto">Auto-Detect (DNA / AA / 0-1 / CSV)</option>
+                <option value="nucleotide">Nucleotide (DNA / RNA)</option>
+                <option value="protein">Protein (20-State AA)</option>
+                <option value="translate">Translate CDS (DNA → AA)</option>
+                <option value="binary">Binary (0/1 Somatic / Trait)</option>
+                <option value="discrete">Discrete Unordered (K-State)</option>
+                <option value="ordered">Ordered CNA / Zygosity (0..K−1)</option>
+              </select>
+            </label>
+            <label id="s0CodingWrapLabel" style="display:inline-flex; align-items:center; gap:6px; font-size:12.5px; font-weight:600; color:var(--ink-secondary);">
+              <span>3rd-Pos Weighting:</span>
               <select id="s0CodingModeSelect" class="clean-select" style="padding:4px 8px; font-size:12.5px;" onchange="onStage0SettingChange()">
-                <option value="auto">Auto-Detect (L mod 3 = 0)</option>
-                <option value="on">Force Coding On</option>
-                <option value="off">Force Uniform Off</option>
+                <option value="auto">Auto (L mod 3 = 0)</option>
+                <option value="on">Force On</option>
+                <option value="off">Force Off</option>
               </select>
             </label>
             <label style="display:inline-flex; align-items:center; gap:6px; font-size:12.5px; font-weight:600; color:var(--ink-secondary); cursor:pointer;">
               <input type="checkbox" id="chkDeduplicateTaxa" onchange="onStage0SettingChange()" />
-              <span>Exclude Identical Duplicates</span>
+              <span>Exclude Duplicates</span>
             </label>
           </div>
         </div>
@@ -1608,9 +1620,9 @@
                 <th style="width:42px;">Use</th>
                 <th>#</th>
                 <th>Taxon Label &amp; Species / Clade Annotation</th>
-                <th>Ungapped Len</th>
-                <th>Gap / N %</th>
-                <th>GC %</th>
+                <th id="s0ColLenHeader">Ungapped Len</th>
+                <th id="s0ColGapHeader">Gap / Missing %</th>
+                <th id="s0ColCompHeader">GC %</th>
                 <th>Private Mutations (Terminal Load)</th>
                 <th>Status</th>
               </tr>
@@ -1758,6 +1770,7 @@
             <label style="display:inline-flex; align-items:center; gap:6px; font-size:12.5px; font-weight:600; color:var(--ink-secondary);">
               <span>Min Shunt Sites:</span>
               <select id="s2MinShuntSelect" class="clean-select" style="padding:4px 8px; font-size:12.5px;" onchange="rerunShuntStageWithParams()">
+                <option value="1">1 site</option>
                 <option value="2">2 sites</option>
                 <option value="3">3 sites</option>
                 <option value="4" selected>4 sites (Default)</option>
@@ -1962,15 +1975,15 @@
         </div>
 
         <div>
-          <span class="section-heading">Site-by-Site Nucleotide &amp; Amino-Acid Convergence / Transfer Table</span>
+          <span class="section-heading" id="s2DrawerSitesSectionTitle">Site-by-Site Convergence / Transfer Forensics Table</span>
           <div class="table-wrap" style="max-height:320px; overflow-y:auto; border:1px solid var(--border); border-radius:8px;">
             <table class="data-table">
-              <thead>
+              <thead id="s2DrawerSitesHead">
                 <tr>
                   <th>Site (1-based)</th>
-                  <th>Codon #</th>
-                  <th>Clade U State (Codon / AA)</th>
-                  <th>Clade V State (Codon / AA)</th>
+                  <th>Codon / Feature</th>
+                  <th>Clade U State</th>
+                  <th>Clade V State</th>
                   <th>Outgroup Consensus</th>
                   <th>Evolutionary Annotation</th>
                 </tr>
@@ -2133,11 +2146,11 @@
   <div id="pasteModal" class="modal-backdrop" onclick="closePasteModal()">
     <div class="modal-card" onclick="event.stopPropagation()">
       <div style="display:flex; justify-content:space-between; align-items:center;">
-        <strong style="font-size:16px;">Paste FASTA, PHYLIP, NEXUS, or Newick Tree</strong>
+        <strong style="font-size:16px;">Paste DNA, Protein, Binary/CSV Matrix, or Newick Tree</strong>
         <button class="btn btn-sm" onclick="closePasteModal()">✕</button>
       </div>
-      <input type="text" id="pasteLabelInput" class="clean-input" value="custom_alignment.fasta" placeholder="Dataset label" />
-      <textarea id="pasteSeqTextarea" class="fasta-box" placeholder=">Taxon_1&#10;ATGGTG...&#10;>Taxon_2&#10;ATGGTG...&#10;&#10;Or paste a Newick tree: ((A:0.01,B:0.02):0.05,C:0.03);"></textarea>
+      <input type="text" id="pasteLabelInput" class="clean-input" value="custom_alignment.fasta" placeholder="Dataset label (.fasta, .faa, .csv, .nwk)" />
+      <textarea id="pasteSeqTextarea" class="fasta-box" placeholder=">Taxon_1&#10;ATGGTG... (DNA), MGLSDG... (Protein AA), or 0100110... (Binary)&#10;&#10;Or paste a CSV/TSV matrix (Clone,Gene1,Gene2,...) or Newick tree ((A:0.01,B:0.02):0.05,C:0.03);"></textarea>
       <div style="display:flex; justify-content:flex-end; gap:8px;">
         <button class="btn" onclick="closePasteModal()">Cancel</button>
         <button class="btn btn-primary" onclick="applyPastedInput()">Load into Workbench</button>
@@ -2242,7 +2255,9 @@
         </div>
         <div style="display:flex; gap:6px; flex-wrap:wrap; align-items:center;">
           <span style="font-family:var(--font-mono); font-size:11px; color:var(--ink-muted);">Sample URLs:</span>
-          <button class="walkthrough-chip-btn" onclick="document.getElementById('streamRemoteUrlInput').value='./examples/prestin.fasta'">Mammalian Prestin (116 sp)</button>
+          <button class="walkthrough-chip-btn" onclick="document.getElementById('streamRemoteUrlInput').value='./examples/prestin.fasta'">Mammalian Prestin CDS (116 sp)</button>
+          <button class="walkthrough-chip-btn" onclick="document.getElementById('streamRemoteUrlInput').value='./examples/prestin_protein.faa'">Mammalian Prestin Protein AA (745 aa)</button>
+          <button class="walkthrough-chip-btn" onclick="document.getElementById('streamRemoteUrlInput').value='./examples/aml_clones_binary.csv'">AML Single-Cell Binary Clones (CSV)</button>
           <button class="walkthrough-chip-btn" onclick="document.getElementById('streamRemoteUrlInput').value='https://raw.githubusercontent.com/veg/hyphy-analyses/master/BUSTED-PH/examples/CD2.nex'">veg/hyphy-analyses CD2.nex</button>
         </div>
         <input type="url" id="streamRemoteUrlInput" class="clean-input" placeholder="https://raw.githubusercontent.com/.../alignment.fasta" />
@@ -2463,14 +2478,39 @@
       AGT:'S', AGC:'S', AGA:'R', AGG:'R', GGT:'G', GGC:'G', GGA:'G', GGG:'G'
     };
 
+    const AA_DAYHOFF_CLASS = {
+      A: 'Aliphatic', I: 'Aliphatic', L: 'Aliphatic', M: 'Aliphatic', V: 'Aliphatic',
+      F: 'Aromatic',  W: 'Aromatic',  Y: 'Aromatic',
+      C: 'Polar',     N: 'Polar',     Q: 'Polar',     S: 'Polar',     T: 'Polar',
+      H: 'Basic (+)', K: 'Basic (+)', R: 'Basic (+)',
+      D: 'Acidic (−)',E: 'Acidic (−)',
+      G: 'Special',   P: 'Special'
+    };
+
     const CURATED_BENCHMARKS = [
       {
         id: 'prestin',
-        title: 'Mammalian Prestin (SLC26A5) — Echolocation Convergence',
-        badge: '116 taxa × 2,235 bp',
+        title: 'Mammalian Prestin CDS (SLC26A5) — Echolocation Convergence',
+        badge: '116 taxa × 2,235 bp (DNA)',
         badgeClass: 'purple',
-        desc: 'Outer hair cell motor protein across 116 placental, marsupial, and monotreme mammals. Classic test case for functional molecular convergence between echolocating dolphins and bats.',
+        desc: 'Outer hair cell motor protein coding DNA across 116 placental, marsupial, and monotreme mammals. Classic test case for functional molecular convergence between echolocating dolphins and bats.',
         discovery: 'Expected Discovery: SPARSE Shunt N143 (Delphinidae) ↔ N192 (Rhinolophoidea) (+7.80 nats, P = 99.96%, 5 convergent codons: N7T, I384T, S392A, L497M, G601A)'
+      },
+      {
+        id: 'prestin_aa',
+        title: 'Mammalian Prestin Protein (SLC26A5) — 20-State Amino-Acid MDL',
+        badge: '116 taxa × 745 AA (Protein)',
+        badgeClass: 'purple',
+        desc: 'Authentic 20-letter amino-acid alignment of mammalian Prestin scored directly under Dayhoff–Miyata 6-class & LG08+CAT8 exchangeability MDL with zero nucleotide codon input.',
+        discovery: 'Expected Discovery: 47 mammal splits + 13 polytomy hubs + SPARSE AA Shunt Delphinidae ↔ Rhinolophoidea (+4.42 nats, P = 98.8%, residues 7, 38, 384, 392, 497, 601)'
+      },
+      {
+        id: 'aml_binary',
+        title: 'Human AML Single-Cell Clones (Morita 2020) — Binary Somatic Matrix',
+        badge: '256 clones × 31 genes (0/1 CSV)',
+        badgeClass: 'orange',
+        desc: 'Empirical single-cell Tapestri somatic mutation matrix (0/1 presence-absence across 31 leukemia driver genes: DNMT3A, NPM1, FLT3, NRAS, IDH2, TET2, WT1, PTPN11) from 123 AML patients.',
+        discovery: 'Expected Discovery: 34 clonal trunk splits + 27 calibrated leukemic burst hubs + 0 false-positive HGT shunts across parallel RTK/RAS resistance hits'
       },
       {
         id: 'InfluenzaA',
@@ -2763,14 +2803,23 @@
           }
           if (payload.type === 'init') {
             resolve({ type: 'ready' });
-          } else if (payload.type === 'infer_fasta') {
+          } else if (payload.type === 'infer_alignment' || payload.type === 'infer_fasta') {
             const t0 = performance.now();
-            const jsonStr = fallbackEngine.infer_fasta(
-              String(payload.fastaText || ''),
-              Boolean(payload.codingAware),
-              Boolean(payload.detectShunts),
-              Number(payload.minShuntSites || 4)
-            );
+            const mode = String(payload.dataMode || 'auto');
+            const jsonStr = typeof fallbackEngine.infer_alignment === 'function'
+              ? fallbackEngine.infer_alignment(
+                  String(payload.fastaText || ''),
+                  mode,
+                  Boolean(payload.codingAware),
+                  Boolean(payload.detectShunts),
+                  Number(payload.minShuntSites || 4)
+                )
+              : fallbackEngine.infer_fasta(
+                  String(payload.fastaText || ''),
+                  Boolean(payload.codingAware),
+                  Boolean(payload.detectShunts),
+                  Number(payload.minShuntSites || 4)
+                );
             resolve({ type: 'infer_result', jsonStr, wallMs: performance.now() - t0 });
           } else if (payload.type === 'compress_bwz') {
             const bytes = fallbackEngine.compress_bwz(
@@ -2969,15 +3018,47 @@
     };
 
     // =========================================================================
-    // 5. STAGE 0: MULTI-FORMAT ALIGNMENT PARSER & SITE COHERENCE QA ENGINE
+    // 5. STAGE 0: MULTI-FORMAT & MULTI-ALPHABET PARSER + SITE COHERENCE ENGINE
     // =========================================================================
+    function parseCellStateTokenJS(tok) {
+      const t = String(tok ?? '').trim().replace(/^['"]|['"]$/g, '');
+      if (!t || t === '?' || t === '-' || t === '.' || /^NA$/i.test(t) || /^NAN$/i.test(t) || /^NULL$/i.test(t)) {
+        return { ok: true, state: -1 };
+      }
+      if (/^\d+$/.test(t)) {
+        const v = parseInt(t, 10);
+        if (v >= 0 && v <= 31) return { ok: true, state: v };
+      }
+      if (/^\d+\.0+$/.test(t)) {
+        const v = Math.round(parseFloat(t));
+        if (v >= 0 && v <= 31) return { ok: true, state: v };
+      }
+      return { ok: false, state: -1 };
+    }
+
+    function stateIntToSymbolChar(st) {
+      if (st < 0) return '?';
+      if (st < 10) return String(st);
+      if (st < 32) return String.fromCharCode(65 + (st - 10));
+      return 'V';
+    }
+
+    function symbolCharToStateDisplay(ch, isDiscreteLike) {
+      if (!ch || ch === '-' || ch === '?') return '—';
+      if (!isDiscreteLike) return ch;
+      const code = ch.charCodeAt(0);
+      if (code >= 48 && code <= 57) return ch;
+      if (code >= 65 && code <= 86) return String(10 + (code - 65));
+      return ch;
+    }
+
     function detectFormatAndParseAlignment(rawText) {
       const clean = String(rawText || '').replace(/^\uFEFF/, '').replace(/\r\n?/g, '\n').trim();
       if (!clean) throw new Error('Empty input text');
 
       // Check if pure Newick tree
       if (clean.startsWith('(') && clean.endsWith(';')) {
-        return { format: 'NEWICK', newick: clean, names: [], seqs: [] };
+        return { format: 'NEWICK', newick: clean, names: [], seqs: [], featureNames: [] };
       }
 
       // Check NEXUS (#NEXUS or BEGIN DATA / CHARACTERS / TREES)
@@ -3001,19 +3082,22 @@
             }
           }
           if (order.length >= 3) {
-            return { format: 'NEXUS', names: order, seqs: order.map(k => seqMap.get(k)) };
+            return { format: 'NEXUS', names: order, seqs: order.map(k => seqMap.get(k)), featureNames: [] };
           }
         }
-        // If NEXUS has only a TREES block and no MATRIX
         if (/BEGIN\s+TREES/i.test(clean)) {
-          return { format: 'NEWICK', newick: clean, names: [], seqs: [] };
+          return { format: 'NEWICK', newick: clean, names: [], seqs: [], featureNames: [] };
         }
       }
 
       // Check PHYLIP header: "N L"
-      const firstLine = clean.split('\n')[0].trim();
+      const nonCommentLines = clean.split('\n').filter(l => {
+        const t = l.trim();
+        return t && !t.startsWith('#');
+      });
+      const firstLine = (nonCommentLines[0] || '').trim();
       const hdrMatch = firstLine.match(/^(\d+)\s+(\d+)$/);
-      if (hdrMatch) {
+      if (hdrMatch && !firstLine.includes(',') && !firstLine.includes('\t')) {
         const nExp = parseInt(hdrMatch[1], 10);
         const lines = clean.split('\n').slice(1).map(l => l.trim()).filter(Boolean);
         const names = [];
@@ -3031,11 +3115,92 @@
           }
         }
         if (names.length >= 3) {
-          return { format: 'PHYLIP', names, seqs };
+          return { format: 'PHYLIP', names, seqs, featureNames: [] };
         }
       }
 
-      // Default: FASTA
+      // Check CSV / TSV Discrete or Binary Character Matrix
+      if (!firstLine.startsWith('>') && !firstLine.startsWith(';') && (firstLine.includes(',') || firstLine.includes('\t'))) {
+        const isTab = firstLine.includes('\t') && !firstLine.includes(',');
+        const delim = isTab ? '\t' : ',';
+        const fmt = isTab ? 'TSV' : 'CSV';
+        const rows = nonCommentLines.map(l => l.split(delim).map(x => x.trim()));
+        if (rows.length >= 3 && rows[0].length >= 2) {
+          // 1. Sitka-style genomic bin-by-cell CSV: chr,start,end,cell1,cell2,...
+          if (
+            rows[0].length >= 5 &&
+            /^chr$/i.test(rows[0][0].replace(/^['"]|['"]$/g, '')) &&
+            /^start$/i.test(rows[0][1].replace(/^['"]|['"]$/g, '')) &&
+            /^end$/i.test(rows[0][2].replace(/^['"]|['"]$/g, ''))
+          ) {
+            const cellNames = rows[0].slice(3).map(s => s.replace(/^['"]|['"]$/g, ''));
+            const nCells = cellNames.length;
+            const lBins = rows.length - 1;
+            const featureNames = [];
+            const cellChars = Array.from({ length: nCells }, () => []);
+            for (let r = 1; r <= lBins; r++) {
+              const toks = rows[r];
+              if (toks.length < nCells + 3) continue;
+              featureNames.push(`${toks[0].replace(/^['"]|['"]$/g, '')}_${toks[1]}_${toks[2]}`);
+              for (let c = 0; c < nCells; c++) {
+                const p = parseCellStateTokenJS(toks[c + 3]);
+                cellChars[c].push(stateIntToSymbolChar(p.ok ? p.state : -1));
+              }
+            }
+            if (nCells >= 3 && featureNames.length >= 1) {
+              return { format: fmt, names: cellNames, seqs: cellChars.map(a => a.join('')), featureNames, isCsvMatrix: true };
+            }
+          }
+
+          // 2. R write.table feature-by-cell CSV (row 0 has N cell names; rows 1.. have locus + N states)
+          if (rows[1].length === rows[0].length + 1 && parseCellStateTokenJS(rows[1][1]).ok) {
+            const cellNames = rows[0].map(s => s.replace(/^['"]|['"]$/g, ''));
+            const nCells = cellNames.length;
+            const featureNames = [];
+            const cellChars = Array.from({ length: nCells }, () => []);
+            for (let r = 1; r < rows.length; r++) {
+              const toks = rows[r];
+              if (toks.length !== nCells + 1) continue;
+              featureNames.push(toks[0].replace(/^['"]|['"]$/g, ''));
+              for (let c = 0; c < nCells; c++) {
+                const p = parseCellStateTokenJS(toks[c + 1]);
+                cellChars[c].push(stateIntToSymbolChar(p.ok ? p.state : -1));
+              }
+            }
+            if (nCells >= 3 && featureNames.length >= 1) {
+              return { format: fmt, names: cellNames, seqs: cellChars.map(a => a.join('')), featureNames, isCsvMatrix: true };
+            }
+          }
+
+          // 3. Standard taxon-by-feature CSV/TSV (optional header row)
+          const row0DataTokens = rows[0].slice(1);
+          const hasHeader = !row0DataTokens.every(tok => parseCellStateTokenJS(tok).ok);
+          const startRow = hasHeader ? 1 : 0;
+          const nCols = rows[startRow] ? rows[startRow].length - 1 : 0;
+          const featureNames = hasHeader
+            ? rows[0].slice(1).map((s, idx) => s.replace(/^['"]|['"]$/g, '') || `F${idx + 1}`)
+            : Array.from({ length: nCols }, (_, idx) => `F${idx + 1}`);
+          const names = [];
+          const seqs = [];
+          for (let r = startRow; r < rows.length; r++) {
+            const toks = rows[r];
+            if (toks.length < 2) continue;
+            const nm = toks[0].replace(/^['"]|['"]$/g, '') || `Taxon_${names.length + 1}`;
+            const chars = [];
+            for (let c = 1; c <= featureNames.length; c++) {
+              const p = parseCellStateTokenJS(toks[c]);
+              chars.push(stateIntToSymbolChar(p.ok ? p.state : -1));
+            }
+            names.push(nm);
+            seqs.push(chars.join(''));
+          }
+          if (names.length >= 3 && featureNames.length >= 1) {
+            return { format: fmt, names, seqs, featureNames, isCsvMatrix: true };
+          }
+        }
+      }
+
+      // Default: FASTA / FAA
       const names = [];
       const seqs = [];
       let curName = null;
@@ -3059,21 +3224,62 @@
         seqs.push(curChunks.join('').toUpperCase());
       }
       if (names.length === 0) {
-        throw new Error('Could not parse FASTA, PHYLIP, NEXUS, or Newick records from input.');
+        throw new Error('Could not parse FASTA, FAA, PHYLIP, NEXUS, CSV/TSV, or Newick records from input.');
       }
-      return { format: 'FASTA', names, seqs };
+      return { format: 'FASTA', names, seqs, featureNames: [] };
+    }
+
+    function autoDetectAlphabetKindJS(seqs, isCsvMatrix) {
+      let digits01 = 0, digits29 = 0, aaExcl = 0, acgtu = 0, nonGap = 0;
+      const sampleN = Math.min(seqs.length, 96);
+      for (let i = 0; i < sampleN; i++) {
+        const s = seqs[i] || '';
+        const sampleL = Math.min(s.length, 4096);
+        for (let j = 0; j < sampleL; j++) {
+          const ch = s[j];
+          if (ch === '-' || ch === '?' || ch === '.' || ch === '*') continue;
+          if (ch >= '0' && ch <= '1') { digits01++; nonGap++; }
+          else if (ch >= '2' && ch <= '9') { digits29++; nonGap++; }
+          else if (isCsvMatrix && ch >= 'A' && ch <= 'V') { digits29++; nonGap++; }
+          else if (ch === 'N' || ch === 'X') { continue; }
+          else {
+            nonGap++;
+            if ('ACGTU'.includes(ch)) acgtu++;
+            if ('EFILPQZJO'.includes(ch)) aaExcl++;
+          }
+        }
+      }
+      if (isCsvMatrix) {
+        return digits29 === 0 ? 'binary' : 'ordered';
+      }
+      if (digits01 > 0 && digits29 === 0 && acgtu === 0 && aaExcl === 0) return 'binary';
+      if ((digits01 + digits29) > 0 && acgtu === 0 && aaExcl === 0) return 'ordered';
+      if (nonGap > 0 && (aaExcl * 50 >= nonGap || (aaExcl >= 2 && acgtu * 100 < nonGap * 85))) return 'protein';
+      return 'nucleotide';
+    }
+
+    function translateCdsSeqJS(ntSeq) {
+      const aa = [];
+      for (let k = 0; k + 2 < ntSeq.length; k += 3) {
+        const c3 = ntSeq.slice(k, k + 3);
+        if (c3 === '---' || c3.includes('?')) aa.push('-');
+        else {
+          const r = GENETIC_CODE[c3] || 'X';
+          aa.push(r === '*' ? '-' : r);
+        }
+      }
+      return aa.join('');
     }
 
     // Harmonize sequences if slightly unaligned (e.g. streamed CDS from NCBI)
-    function harmonizeSequenceLengthsIfNeeded(names, seqs) {
+    function harmonizeSequenceLengthsIfNeeded(names, seqs, isNucleotideLike = true) {
       if (seqs.length === 0) return seqs;
       const lengths = seqs.map(s => s.length);
       const minL = Math.min(...lengths);
       const maxL = Math.max(...lengths);
       if (minL === maxL) return seqs;
 
-      // Determine modal length (or max length divisible by 3)
-      const targetL = maxL % 3 === 0 ? maxL : (maxL + (3 - (maxL % 3)));
+      const targetL = (isNucleotideLike && maxL % 3 !== 0) ? (maxL + (3 - (maxL % 3))) : maxL;
       return seqs.map(s => {
         if (s.length === targetL) return s;
         if (s.length > targetL) return s.slice(0, targetL);
@@ -3091,11 +3297,17 @@
         if (parsed.format === 'NEWICK') {
           stage0Data = {
             format: 'NEWICK',
+            effectiveMode: 'newick',
+            unitLabel: 'tips',
             newick: parsed.newick,
             names: [],
             seqs: [],
+            rawInputSeqs: [],
+            featureNames: [],
+            isCsvMatrix: false,
             nTaxa: 0,
             nSites: 0,
+            kStates: 0,
             isCoding: false,
             lEff: 0,
             starNats: 0,
@@ -3111,64 +3323,103 @@
           return;
         }
 
-        const names = parsed.names;
-        const seqs = harmonizeSequenceLengthsIfNeeded(names, parsed.seqs);
-        const N = names.length;
-        const L = seqs[0].length;
+        const selectedMode = document.getElementById('s0DataModeSelect')?.value || 'auto';
+        const autoKind = autoDetectAlphabetKindJS(parsed.seqs, Boolean(parsed.isCsvMatrix));
+        let effectiveMode = selectedMode === 'auto' ? autoKind : selectedMode;
+        if (effectiveMode === 'translate' && autoKind === 'protein') {
+          effectiveMode = 'protein';
+        }
 
-        const codingSelect = document.getElementById('s0CodingModeSelect')?.value || 'auto';
-        const isCoding = codingSelect === 'on' ? true : (codingSelect === 'off' ? false : (L % 3 === 0));
+        const isNucMode = effectiveMode === 'nucleotide';
+        const isProtMode = effectiveMode === 'protein' || effectiveMode === 'translate';
+        const isBinaryMode = effectiveMode === 'binary';
+        const isDiscreteMode = isBinaryMode || effectiveMode === 'discrete' || effectiveMode === 'ordered';
+
+        // Enable/dim 3rd-pos coding weighting selector depending on whether nucleotide mode is active
+        const codingSelectEl = document.getElementById('s0CodingModeSelect');
+        const codingWrapEl = document.getElementById('s0CodingWrapLabel');
+        if (codingSelectEl) codingSelectEl.disabled = !isNucMode;
+        if (codingWrapEl) codingWrapEl.style.opacity = isNucMode ? '1' : '0.45';
+
+        const names = parsed.names;
+        const rawInputSeqs = harmonizeSequenceLengthsIfNeeded(names, parsed.seqs, isNucMode || effectiveMode === 'translate');
+        let seqs = rawInputSeqs;
+        if (effectiveMode === 'translate') {
+          seqs = rawInputSeqs.map(translateCdsSeqJS);
+          if (seqs.length > 0 && seqs[0].length > 1 && seqs.every(s => s.endsWith('-'))) {
+            seqs = seqs.map(s => s.slice(0, -1));
+          }
+        }
+
+        const N = names.length;
+        const L = seqs[0] ? seqs[0].length : 0;
+        if (L === 0) throw new Error('Alignment contains 0 columns after parsing.');
+
+        // Adjust default Stage 2 min shunt sites for compact panels vs long sequence alignments
+        const minShuntEl = document.getElementById('s2MinShuntSelect');
+        if (minShuntEl && !currentResult) {
+          minShuntEl.value = (isDiscreteMode && L <= 120) ? '2' : '4';
+        }
+
+        const codingSelect = codingSelectEl?.value || 'auto';
+        const isCoding = isNucMode && (codingSelect === 'on' ? true : (codingSelect === 'off' ? false : (L % 3 === 0)));
         const excludeDups = Boolean(document.getElementById('chkDeduplicateTaxa')?.checked);
 
-        // Compute per-site nucleotide frequencies, Shannon entropy, parsimony steps on star tree, and 3rd-pos coherence
+        function isMissingChar(ch) {
+          if (ch === '-' || ch === '?' || ch === '.' || ch === '*') return true;
+          if (isNucMode) return !(ch === 'A' || ch === 'C' || ch === 'G' || ch === 'T' || ch === 'U');
+          if (isProtMode) return (ch === 'X' || ch === 'B' || ch === 'Z' || ch === 'J');
+          if (isBinaryMode) return !(ch === '0' || ch === '1');
+          return false;
+        }
+
         const siteEntropy = new Float64Array(L);
         const siteWeights = new Float64Array(L);
-        const siteMajority = new Uint8Array(L);
+        const siteMajority = new Array(L).fill('-');
+        const globalObservedSymbols = new Set();
         let parsimonyInformativeCount = 0;
         let starMutTotal = 0;
         const posVarCounts = [0, 0, 0];
 
         for (let s = 0; s < L; s++) {
-          let cA = 0, cC = 0, cG = 0, cT = 0;
+          const symCounts = new Map();
+          let tot = 0;
           for (let i = 0; i < N; i++) {
-            const ch = seqs[i].charCodeAt(s);
-            if (ch === 65) cA++;
-            else if (ch === 67) cC++;
-            else if (ch === 71) cG++;
-            else if (ch === 84 || ch === 85) cT++;
+            let ch = seqs[i][s] || '-';
+            if (isNucMode && ch === 'U') ch = 'T';
+            if (isMissingChar(ch)) continue;
+            tot++;
+            symCounts.set(ch, (symCounts.get(ch) || 0) + 1);
+            globalObservedSymbols.add(ch);
           }
-          const tot = cA + cC + cG + cT;
           if (tot === 0) {
             siteEntropy[s] = 0;
             siteWeights[s] = 0.2;
-            siteMajority[s] = 65;
+            siteMajority[s] = '-';
             continue;
           }
-          const counts = [cA, cC, cG, cT];
-          const chars = [65, 67, 71, 84];
-          let maxC = -1, majChar = 65, nAllelesAtLeast2 = 0, nAlleles = 0;
-          let h = 0;
-          for (let k = 0; k < 4; k++) {
-            const c = counts[k];
-            if (c > 0) {
-              nAlleles++;
-              if (c >= 2) nAllelesAtLeast2++;
-              const p = c / tot;
-              h -= p * Math.log(p);
-            }
+          let maxC = -1, majSym = '-', nAllelesAtLeast2 = 0, nAlleles = 0, h = 0;
+          for (const [sym, c] of symCounts.entries()) {
+            nAlleles++;
+            if (c >= 2) nAllelesAtLeast2++;
+            const p = c / tot;
+            h -= p * Math.log(p);
             if (c > maxC) {
               maxC = c;
-              majChar = chars[k];
+              majSym = sym;
             }
           }
-          siteMajority[s] = majChar;
+          siteMajority[s] = majSym;
           siteEntropy[s] = h;
           if (nAllelesAtLeast2 >= 2) parsimonyInformativeCount++;
           if (nAlleles >= 2) posVarCounts[s % 3]++;
           starMutTotal += (tot - maxC);
         }
 
-        // Compute coding 3rd-position coherence weights
+        const kStates = isNucMode
+          ? 4
+          : (isProtMode ? 20 : (isBinaryMode ? 2 : Math.max(2, globalObservedSymbols.size)));
+
         const totVar = Math.max(1, posVarCounts[0] + posVarCounts[1] + posVarCounts[2]);
         const posMult = isCoding
           ? [
@@ -3178,35 +3429,38 @@
             ]
           : [1.0, 1.0, 1.0];
 
+        const maxEntropyCap = Math.log(Math.max(2, kStates)) * 0.72;
         let lEff = 0;
         for (let s = 0; s < L; s++) {
-          const w = posMult[s % 3] * (siteEntropy[s] > 0.95 ? 0.55 : 1.0);
+          const w = posMult[s % 3] * (siteEntropy[s] > maxEntropyCap ? 0.55 : 1.0);
           siteWeights[s] = w;
           lEff += w;
         }
 
         const cohortPrefixMap = inferCohortPrefixMap(names);
-        // Build per-taxon QA records
         const seenSeqHash = new Map();
         const taxaRecords = [];
+        const hydrophobicSet = new Set(['A', 'I', 'L', 'M', 'F', 'W', 'Y', 'V']);
+
         for (let i = 0; i < N; i++) {
           const rawName = names[i];
           const seq = seqs[i];
-          let nA = 0, nC = 0, nG = 0, nT = 0, nGap = 0, nPrivate = 0;
+          let ungapped = 0, nGap = 0, nCompHits = 0, nPrivate = 0;
           for (let s = 0; s < L; s++) {
-            const ch = seq.charCodeAt(s);
-            if (ch === 65) nA++;
-            else if (ch === 67) nC++;
-            else if (ch === 71) nG++;
-            else if (ch === 84 || ch === 85) nT++;
-            else nGap++;
-            if ((ch === 65 || ch === 67 || ch === 71 || ch === 84 || ch === 85) && ch !== siteMajority[s]) {
-              nPrivate++;
+            let ch = seq[s] || '-';
+            if (isNucMode && ch === 'U') ch = 'T';
+            if (isMissingChar(ch)) {
+              nGap++;
+            } else {
+              ungapped++;
+              if (isNucMode && (ch === 'C' || ch === 'G')) nCompHits++;
+              else if (isProtMode && hydrophobicSet.has(ch)) nCompHits++;
+              else if (isDiscreteMode && ch !== '0') nCompHits++;
+              if (siteMajority[s] !== '-' && ch !== siteMajority[s]) nPrivate++;
             }
           }
-          const ungapped = nA + nC + nG + nT;
           const gapPct = (nGap / Math.max(1, L)) * 100.0;
-          const gcPct = ungapped > 0 ? ((nC + nG) / ungapped) * 100.0 : 0.0;
+          const compPct = ungapped > 0 ? (nCompHits / ungapped) * 100.0 : 0.0;
 
           let duplicateOf = null;
           if (seenSeqHash.has(seq)) {
@@ -3228,20 +3482,35 @@
             ungappedLen: ungapped,
             gapCount: nGap,
             gapPct,
-            gcPct,
+            gcPct: compPct,
+            compPct,
             privateMuts: nPrivate,
             duplicateOf,
             isHighGap: gapPct > 25.0
           });
         }
 
-        const rawNats = N * L * Math.log(4);
-        const starNats = L * Math.log(4) + starMutTotal * (Math.log(3) + 1.4);
+        const lnK = Math.log(Math.max(2, kStates));
+        const substCost = kStates <= 2 ? 0.0 : (isProtMode ? 2.35 : Math.log(kStates - 1));
+        const rawNats = N * L * lnK;
+        const starNats = L * lnK + starMutTotal * (substCost + 1.4);
+        const unitLabel = isNucMode ? 'bp' : (isProtMode ? 'aa' : 'loci');
+        const compLabel = isNucMode
+          ? 'GC %'
+          : (isProtMode ? 'Hydrophobic %' : (isBinaryMode ? 'Derived (1) %' : 'Non-Zero %'));
 
         stage0Data = {
           format: parsed.format,
+          selectedMode,
+          effectiveMode,
+          kStates,
+          unitLabel,
+          compLabel,
+          isCsvMatrix: Boolean(parsed.isCsvMatrix),
+          featureNames: parsed.featureNames || [],
           names,
           seqs,
+          rawInputSeqs,
           nTaxa: N,
           nSites: L,
           isCoding,
@@ -3339,15 +3608,26 @@
       const admittedCnt = getAdmittedTaxaCount();
       const dupCnt = d.taxaRecords.filter(r => r.duplicateOf !== null).length;
       const highGapCnt = d.taxaRecords.filter(r => r.isHighGap).length;
+      const unit = d.unitLabel || 'bp';
 
       document.getElementById('s0VerdictSentence').textContent =
-        `${admittedCnt} of ${d.nTaxa} taxa admitted across ${d.nSites.toLocaleString()} columns (${d.parsimonyInformativeCount.toLocaleString()} parsimony-informative sites)`;
+        `${admittedCnt} of ${d.nTaxa} taxa admitted across ${d.nSites.toLocaleString()} ${unit} (${d.parsimonyInformativeCount.toLocaleString()} parsimony-informative columns)`;
 
       document.getElementById('s0MetricTaxa').textContent = `${admittedCnt} / ${d.nTaxa}`;
-      document.getElementById('s0MetricTaxaSub').textContent = dupCnt > 0 ? `${dupCnt} identical duplicates detected` : '100% unique sequences';
+      document.getElementById('s0MetricTaxaSub').textContent = dupCnt > 0 ? `${dupCnt} identical duplicates detected` : '100% unique profiles';
 
-      document.getElementById('s0MetricLen').textContent = `${d.nSites.toLocaleString()} bp`;
-      document.getElementById('s0MetricLenSub').textContent = d.isCoding ? `${Math.floor(d.nSites / 3).toLocaleString()} codons (in-frame)` : 'Nucleotide alignment';
+      document.getElementById('s0MetricLen').textContent = `${d.nSites.toLocaleString()} ${unit}`;
+      if (d.effectiveMode === 'translate') {
+        document.getElementById('s0MetricLenSub').textContent = `Translated from ${(d.rawInputSeqs[0]?.length || d.nSites * 3).toLocaleString()} bp CDS`;
+      } else if (d.effectiveMode === 'protein') {
+        document.getElementById('s0MetricLenSub').textContent = '20-state amino-acid alignment';
+      } else if (d.effectiveMode === 'binary') {
+        document.getElementById('s0MetricLenSub').textContent = d.featureNames.length > 0 ? `${d.featureNames.length} named binary features` : 'Binary (0/1) trait matrix';
+      } else if (d.effectiveMode === 'discrete' || d.effectiveMode === 'ordered') {
+        document.getElementById('s0MetricLenSub').textContent = `K = ${d.kStates} discrete character states`;
+      } else {
+        document.getElementById('s0MetricLenSub').textContent = d.isCoding ? `${Math.floor(d.nSites / 3).toLocaleString()} codons (in-frame)` : 'Nucleotide alignment';
+      }
 
       document.getElementById('s0MetricLeff').textContent = `${d.lEff.toFixed(1)}`;
       document.getElementById('s0MetricLeffSub').textContent = `${d.parsimonyInformativeCount.toLocaleString()} parsimony-informative`;
@@ -3355,8 +3635,37 @@
       document.getElementById('s0MetricStar').textContent = `${Math.round(d.starNats).toLocaleString()} nats`;
       document.getElementById('s0MetricStarSub').textContent = `Raw uncompressed: ${Math.round(d.rawNats).toLocaleString()} nats`;
 
-      document.getElementById('s0MetricRegime').textContent = d.isCoding ? 'Coding CDS (3rd-Pos)' : 'Uniform Nucleotide';
-      document.getElementById('s0MetricRegimeSub').textContent = `${d.format} • 1st/2nd/3rd var: ${d.posVarCounts[0]}/${d.posVarCounts[1]}/${d.posVarCounts[2]}`;
+      const regimeMap = {
+        nucleotide: d.isCoding ? 'Coding CDS (3rd-Pos)' : 'Uniform Nucleotide',
+        protein: 'Protein (Dayhoff / LG08)',
+        translate: 'Translated CDS → AA',
+        binary: 'Binary (0/1 Exact MDL)',
+        discrete: `Unordered Fitch (K=${d.kStates})`,
+        ordered: `Ordered Wagner (K=${d.kStates})`
+      };
+      document.getElementById('s0MetricRegime').textContent = regimeMap[d.effectiveMode] || 'Auto MDL';
+      document.getElementById('s0MetricRegimeSub').textContent =
+        d.effectiveMode === 'nucleotide'
+          ? `${d.format} • 1st/2nd/3rd var: ${d.posVarCounts[0]}/${d.posVarCounts[1]}/${d.posVarCounts[2]}`
+          : `${d.format} • Alphabet K = ${d.kStates} states`;
+
+      const colLenEl = document.getElementById('s0ColLenHeader');
+      const colGapEl = document.getElementById('s0ColGapHeader');
+      const colCompEl = document.getElementById('s0ColCompHeader');
+      if (colLenEl) colLenEl.textContent = unit === 'loci' ? 'Observed Loci' : `Ungapped (${unit})`;
+      if (colGapEl) colGapEl.textContent = unit === 'loci' ? 'Missing / NA %' : 'Gap / Ambig %';
+      if (colCompEl) colCompEl.textContent = d.compLabel || 'GC %';
+
+      const capEl = document.getElementById('s0HorizonCaption');
+      if (capEl) {
+        if (d.effectiveMode === 'protein' || d.effectiveMode === 'translate') {
+          capEl.textContent = 'Green = Informative amino-acid sites • Amber = Hypervariable / saturated residue columns';
+        } else if (d.effectiveMode === 'binary' || d.effectiveMode === 'discrete' || d.effectiveMode === 'ordered') {
+          capEl.textContent = 'Green = Informative somatic / trait / CNA columns • Grey = Invariant background loci';
+        } else {
+          capEl.textContent = 'Green = High phylogenetic coherence (1st/2nd pos) • Amber = Fast-saturating 3rd-pos / hypervariable columns';
+        }
+      }
 
       document.getElementById('s0CntAll').textContent = String(d.nTaxa);
       document.getElementById('s0CntAdmitted').textContent = String(admittedCnt);
@@ -3371,6 +3680,8 @@
       const wrap = document.getElementById('s0HorizonSvgWrap');
       if (!wrap || !stage0Data) return;
       const L = stage0Data.nSites;
+      const maxH = Math.log(Math.max(2, stage0Data.kStates || 4));
+      const unitLbl = stage0Data.unitLabel === 'aa' ? 'Residue' : (stage0Data.unitLabel === 'loci' ? 'Locus' : 'Site');
       const W = 960, H = 74;
       const nBins = Math.min(240, L);
       let bars = '';
@@ -3384,19 +3695,19 @@
         }
         const avgH = sumH / (s1 - s0);
         const avgW = sumW / (s1 - s0);
-        const barH = Math.max(2, Math.min(H - 22, (avgH / 1.386) * (H - 22)));
+        const barH = Math.max(2, Math.min(H - 22, (avgH / maxH) * (H - 22)));
         const x = (b / nBins) * W;
         const bw = Math.max(1.5, (W / nBins) - 1);
-        const col = avgW < 0.72 ? '#B45309' : (avgH > 0.08 ? '#18794E' : '#CFCBC0');
+        const col = avgW < 0.72 ? '#B45309' : (avgH > 0.05 ? '#18794E' : '#CFCBC0');
         bars += `<rect x="${x.toFixed(1)}" y="${(H - 18 - barH).toFixed(1)}" width="${bw.toFixed(1)}" height="${barH.toFixed(1)}" fill="${col}" rx="1" />`;
       }
       wrap.innerHTML = `
         <svg viewBox="0 0 ${W} ${H}" style="width:100%; height:74px; display:block; background:#FAF9F5; border:1px solid var(--border); border-radius:7px;">
           ${bars}
           <line x1="0" y1="${H - 17}" x2="${W}" y2="${H - 17}" stroke="#E2DFD7" stroke-width="1" />
-          <text x="8" y="${H - 4}" font-family="JetBrains Mono, monospace" font-size="10" fill="#52514E">Site 1</text>
-          <text x="${W * 0.5 - 30}" y="${H - 4}" font-family="JetBrains Mono, monospace" font-size="10" fill="#52514E">Site ${Math.floor(L / 2)}</text>
-          <text x="${W - 68}" y="${H - 4}" font-family="JetBrains Mono, monospace" font-size="10" fill="#52514E">Site ${L}</text>
+          <text x="8" y="${H - 4}" font-family="JetBrains Mono, monospace" font-size="10" fill="#52514E">${unitLbl} 1</text>
+          <text x="${W * 0.5 - 30}" y="${H - 4}" font-family="JetBrains Mono, monospace" font-size="10" fill="#52514E">${unitLbl} ${Math.max(1, Math.floor(L / 2))}</text>
+          <text x="${W - 76}" y="${H - 4}" font-family="JetBrains Mono, monospace" font-size="10" fill="#52514E">${unitLbl} ${L}</text>
         </svg>`;
     }
 
@@ -3417,6 +3728,7 @@
       const tbody = document.getElementById('s0TableBody');
       if (!tbody || !stage0Data) return;
       const q = (document.getElementById('s0SearchInput')?.value || '').trim().toLowerCase();
+      const unit = stage0Data.unitLabel || 'bp';
 
       const rows = stage0Data.taxaRecords.filter(r => {
         const admitted = isTaxonAdmitted(r.index);
@@ -3435,7 +3747,7 @@
         let statusBadge = `<span class="badge admitted">Admitted</span>`;
         if (!admitted) statusBadge = `<span class="badge quarantined">Excluded</span>`;
         else if (r.duplicateOf) statusBadge = `<span class="badge amber">Identical to ${escapeHtml(r.duplicateOf)}</span>`;
-        else if (r.isHighGap) statusBadge = `<span class="badge amber">High Gap (${r.gapPct.toFixed(1)}%)</span>`;
+        else if (r.isHighGap) statusBadge = `<span class="badge amber">High Missing (${r.gapPct.toFixed(1)}%)</span>`;
 
         const speciesHtml = r.commonName
           ? `<span style="color:var(--ink-secondary); font-weight:500; margin-left:6px;">(${escapeHtml(r.commonName)})</span>`
@@ -3453,9 +3765,9 @@
             <td>
               <strong class="mono">${escapeHtml(r.name)}</strong>${speciesHtml}${cladeHtml}
             </td>
-            <td class="mono">${r.ungappedLen.toLocaleString()} bp</td>
+            <td class="mono">${r.ungappedLen.toLocaleString()} ${unit}</td>
             <td class="mono" style="color:${r.gapPct > 25 ? 'var(--amber)' : 'var(--ink-secondary)'};">${r.gapPct.toFixed(1)}%</td>
-            <td class="mono">${r.gcPct.toFixed(1)}%</td>
+            <td class="mono">${r.compPct.toFixed(1)}%</td>
             <td class="mono">${r.privateMuts}</td>
             <td>${statusBadge}</td>
           </tr>`;
@@ -3475,6 +3787,9 @@
       const r = stage0Data.taxaRecords[idx];
       const seq = stage0Data.seqs[idx];
       const admitted = isTaxonAdmitted(idx);
+      const unit = stage0Data.unitLabel || 'bp';
+      const isProt = stage0Data.effectiveMode === 'protein' || stage0Data.effectiveMode === 'translate';
+      const isDisc = stage0Data.effectiveMode === 'binary' || stage0Data.effectiveMode === 'discrete' || stage0Data.effectiveMode === 'ordered';
 
       const badgeEl = document.getElementById('s0DrawerBadge');
       badgeEl.className = admitted ? 'badge admitted' : 'badge quarantined';
@@ -3493,8 +3808,10 @@
         let diff = 0, comp = 0;
         const step = Math.max(1, Math.floor(L / 400));
         for (let s = 0; s < L; s += step) {
-          const a = seq.charCodeAt(s), b = other.charCodeAt(s);
-          if (a !== 45 && a !== 78 && b !== 45 && b !== 78) {
+          const a = seq[s], b = other[s];
+          const aMiss = (a === '-' || a === '?' || (!isProt && !isDisc && a === 'N') || (isProt && a === 'X'));
+          const bMiss = (b === '-' || b === '?' || (!isProt && !isDisc && b === 'N') || (isProt && b === 'X'));
+          if (!aMiss && !bMiss) {
             comp++;
             if (a !== b) diff++;
           }
@@ -3507,25 +3824,25 @@
       }
 
       document.getElementById('s0DrawerHeadline').textContent =
-        r.duplicateOf ? `Identical sequence duplicate of ${r.duplicateOf}` : `Closest cohort neighbor: ${bestName} (${(bestDist * 100).toFixed(2)}% divergence)`;
+        r.duplicateOf ? `Identical profile duplicate of ${r.duplicateOf}` : `Closest cohort neighbor: ${bestName} (${(bestDist * 100).toFixed(2)}% divergence)`;
       document.getElementById('s0DrawerDesc').textContent =
-        `Contains ${r.ungappedLen.toLocaleString()} unambiguous nucleotides (${r.gapPct.toFixed(1)}% gaps/N), GC content ${r.gcPct.toFixed(1)}%, and ${r.privateMuts} site differences from the alignment majority consensus.`;
+        `Contains ${r.ungappedLen.toLocaleString()} observed ${unit} (${r.gapPct.toFixed(1)}% missing/gap), ${stage0Data.compLabel || 'GC %'} ${r.compPct.toFixed(1)}%, and ${r.privateMuts} differences from the cohort majority consensus.`;
 
       document.getElementById('s0DrawerStats').innerHTML = `
         <div class="drawer-stat-cell">
-          <div class="drawer-stat-lbl">Ungapped Length</div>
-          <div class="drawer-stat-val">${r.ungappedLen.toLocaleString()} bp</div>
+          <div class="drawer-stat-lbl">Observed Sites</div>
+          <div class="drawer-stat-val">${r.ungappedLen.toLocaleString()} ${unit}</div>
           <div class="drawer-stat-sub">of ${L.toLocaleString()} columns</div>
         </div>
         <div class="drawer-stat-cell">
-          <div class="drawer-stat-lbl">Gap / Ambiguous</div>
+          <div class="drawer-stat-lbl">Gap / Missing</div>
           <div class="drawer-stat-val">${r.gapPct.toFixed(1)}%</div>
-          <div class="drawer-stat-sub">${r.gapCount.toLocaleString()} sites</div>
+          <div class="drawer-stat-sub">${r.gapCount.toLocaleString()} columns</div>
         </div>
         <div class="drawer-stat-cell">
-          <div class="drawer-stat-lbl">GC Content</div>
-          <div class="drawer-stat-val">${r.gcPct.toFixed(1)}%</div>
-          <div class="drawer-stat-sub">Nucleotide composition</div>
+          <div class="drawer-stat-lbl">${escapeHtml(stage0Data.compLabel || 'GC %')}</div>
+          <div class="drawer-stat-val">${r.compPct.toFixed(1)}%</div>
+          <div class="drawer-stat-sub">Alphabet K = ${stage0Data.kStates}</div>
         </div>
         <div class="drawer-stat-cell">
           <div class="drawer-stat-lbl">Nearest Neighbor</div>
@@ -3534,19 +3851,38 @@
         </div>`;
 
       // Coverage barcode SVG
-      const nBins = 120;
+      const nBins = Math.min(120, Math.max(12, L));
+      const binW = 600 / nBins;
       let rects = '';
       for (let b = 0; b < nBins; b++) {
         const s = Math.floor((b / nBins) * L);
         const ch = seq[s];
-        const isGap = (ch === '-' || ch === 'N' || ch === '?');
-        rects += `<rect x="${b * 5}" y="0" width="4.5" height="22" fill="${isGap ? '#FDECEB' : '#18794E'}" />`;
+        const isGap = (ch === '-' || ch === '?' || (!isProt && !isDisc && ch === 'N') || (isProt && ch === 'X'));
+        const fillCol = isGap ? '#FDECEB' : (isDisc && ch !== '0' ? '#E04F16' : '#18794E');
+        rects += `<rect x="${(b * binW).toFixed(1)}" y="0" width="${Math.max(1, binW - 0.5).toFixed(1)}" height="22" fill="${fillCol}" />`;
       }
       document.getElementById('s0DrawerCoverageBar').innerHTML =
         `<svg viewBox="0 0 600 22" style="width:100%; height:22px; border-radius:5px; border:1px solid var(--border); overflow:hidden;">${rects}</svg>`;
 
-      document.getElementById('s0DrawerSeqPre').textContent =
-        `>${r.name} (first 300 bp)\n${seq.slice(0, 300).match(/.{1,60}/g)?.join('\n') || seq.slice(0, 300)}`;
+      if (isDisc && stage0Data.featureNames && stage0Data.featureNames.length === L) {
+        const activeFeats = [];
+        const previewPairs = [];
+        for (let s = 0; s < Math.min(L, 120); s++) {
+          const disp = symbolCharToStateDisplay(seq[s], true);
+          if (seq[s] !== '0' && seq[s] !== '?' && seq[s] !== '-') {
+            activeFeats.push(`${stage0Data.featureNames[s]}=${disp}`);
+          }
+          previewPairs.push(`${stage0Data.featureNames[s]}:${disp}`);
+        }
+        const activeLine = activeFeats.length > 0
+          ? `Non-zero / derived features (${activeFeats.length}): ${activeFeats.join(', ')}\n\n`
+          : `All ${L} features in reference state (0)\n\n`;
+        document.getElementById('s0DrawerSeqPre').textContent =
+          `>${r.name} (${L} features)\n${activeLine}${previewPairs.join('  ')}`;
+      } else {
+        document.getElementById('s0DrawerSeqPre').textContent =
+          `>${r.name} (first ${Math.min(300, L)} ${unit})\n${seq.slice(0, 300).match(/.{1,60}/g)?.join('\n') || seq.slice(0, 300)}`;
+      }
 
       document.getElementById('s0DrawerBackdrop').classList.add('open');
     };
@@ -3568,10 +3904,32 @@
     // =========================================================================
     function buildCuratedStage0Fasta() {
       if (!stage0Data || !stage0Data.taxaRecords) return '';
+      if (stage0Data.isCsvMatrix) {
+        const L = stage0Data.nSites;
+        const hdrs = (stage0Data.featureNames && stage0Data.featureNames.length === L)
+          ? stage0Data.featureNames
+          : Array.from({ length: L }, (_, i) => `F${i + 1}`);
+        const lines = ['Taxon,' + hdrs.join(',')];
+        for (const r of stage0Data.taxaRecords) {
+          if (!isTaxonAdmitted(r.index)) continue;
+          const rowSeq = stage0Data.seqs[r.index] || '';
+          const cells = [r.name];
+          for (let s = 0; s < L; s++) {
+            const ch = rowSeq[s];
+            cells.push((!ch || ch === '?' || ch === '-') ? '?' : symbolCharToStateDisplay(ch, true));
+          }
+          lines.push(cells.join(','));
+        }
+        return lines.join('\n') + '\n';
+      }
+      // For nucleotide, protein, binary FASTA, or translate mode (pass raw CDS when translating!)
+      const srcSeqs = stage0Data.effectiveMode === 'translate'
+        ? (stage0Data.rawInputSeqs || stage0Data.seqs)
+        : stage0Data.seqs;
       let out = '';
       for (const r of stage0Data.taxaRecords) {
         if (!isTaxonAdmitted(r.index)) continue;
-        out += `>${r.name}\n${stage0Data.seqs[r.index]}\n`;
+        out += `>${r.name}\n${srcSeqs[r.index]}\n`;
       }
       return out;
     }
@@ -3601,8 +3959,9 @@
 
       try {
         const resMsg = await callWorker({
-          type: 'infer_fasta',
+          type: 'infer_alignment',
           fastaText: curatedFasta,
+          dataMode: stage0Data.effectiveMode || 'auto',
           codingAware: stage0Data.isCoding,
           detectShunts,
           minShuntSites: minShunt
@@ -3648,14 +4007,16 @@
     window.rerunShuntStageWithParams = async function() {
       if (!stage0Data || stage0Data.format === 'NEWICK') return;
       const curatedFasta = buildCuratedStage0Fasta();
+      currentCuratedFasta = curatedFasta;
       const minShunt = parseInt(document.getElementById('s2MinShuntSelect')?.value || '4', 10) || 4;
       runningStage = 'stage2';
       document.getElementById('wasmLed').className = 'status-dot busy';
       updatePipelineStepperUI();
       try {
         const resMsg = await callWorker({
-          type: 'infer_fasta',
+          type: 'infer_alignment',
           fastaText: curatedFasta,
+          dataMode: stage0Data.effectiveMode || 'auto',
           codingAware: stage0Data.isCoding,
           detectShunts: true,
           minShuntSites: minShunt
@@ -4211,8 +4572,11 @@
       const lTopo = calcSplitTopoCostJS(Math.max(2, degU), Math.max(2, degV));
       const mE = nd.mutationCount || 0;
       const lEff = currentResult.l_eff || currentResult.n_sites || 1000;
+      const alphaMode = currentResult.alphabet_mode || (stage0Data && stage0Data.alphabet) || 'nucleotide';
+      const kStates = currentResult.k_states || (alphaMode === 'protein' || alphaMode === 'translate' ? 20 : alphaMode === 'binary' ? 2 : 4);
+      const substNats = kStates <= 2 ? 0 : (alphaMode === 'protein' || alphaMode === 'translate' ? 2.35 : Math.log(Math.max(1, kStates - 1)));
       const lHeader = mE > 0
-        ? (Math.log(2) + universalIntNatsJS(mE) + logBinomJS(lEff, Math.min(mE, 0.49 * lEff)) + mE * Math.log(3))
+        ? (Math.log(2) + universalIntNatsJS(mE) + logBinomJS(lEff, Math.min(mE, 0.49 * lEff)) + mE * substNats)
         : Math.log(2);
       const netGain = nd.mdlGain || 0;
       const grossSavings = netGain + lTopo + lHeader;
@@ -4270,9 +4634,17 @@
         synSection.style.display = 'none';
       } else {
         synSection.style.display = 'block';
-        const isCoding = stage0Data && stage0Data.isCoding;
+        const isCoding = alphaMode === 'nucleotide' && stage0Data && stage0Data.isCoding;
+        const featNames = currentResult.feature_names || (stage0Data && stage0Data.featureNames) || null;
         synPills.innerHTML = syns.slice(0, 60).map(s => {
           const site1 = s + 1;
+          if (alphaMode === 'protein' || alphaMode === 'translate') {
+            return `<span class="badge green" style="font-size:11px;">Residue ${site1}</span>`;
+          }
+          if (alphaMode === 'binary' || alphaMode === 'discrete' || alphaMode === 'ordered') {
+            const fn = featNames && featNames[s] ? `${escapeHtml(featNames[s])} (#${site1})` : `Locus ${site1}`;
+            return `<span class="badge green" style="font-size:11px;">${fn}</span>`;
+          }
           const codonLbl = isCoding ? ` (Codon ${Math.floor(s / 3) + 1})` : '';
           return `<span class="badge green" style="font-size:11px;">Site ${site1}${codonLbl}</span>`;
         }).join('');
@@ -5017,11 +5389,13 @@
         });
       }
 
+      const alphaBar = (currentResult && currentResult.alphabet_mode) || (stage0Data && stage0Data.alphabet) || 'nucleotide';
+      const unitBar = (alphaBar === 'protein' || alphaBar === 'translate') ? 'aa' : ((alphaBar === 'binary' || alphaBar === 'discrete' || alphaBar === 'ordered') ? 'loci' : 'bp');
       ctx.fillStyle = '#52514E';
       ctx.font = '600 10px JetBrains Mono, monospace';
-      ctx.fillText('1 bp', 6, H - 4);
-      ctx.fillText(`${Math.floor(L / 2)} bp`, W * 0.5 - 22, H - 4);
-      ctx.fillText(`${L} bp`, W - 52, H - 4);
+      ctx.fillText(`1 ${unitBar}`, 6, H - 4);
+      ctx.fillText(`${Math.floor(L / 2)} ${unitBar}`, W * 0.5 - 24, H - 4);
+      ctx.fillText(`${L} ${unitBar}`, W - 58, H - 4);
       ctx.restore();
 
       canvas.onclick = () => {
@@ -5045,16 +5419,31 @@
         return;
       }
 
-      const isCoding = stage0Data && stage0Data.isCoding;
+      const alphaMode = currentResult.alphabet_mode || (stage0Data && stage0Data.alphabet) || 'nucleotide';
+      const isCoding = alphaMode === 'nucleotide' && stage0Data && stage0Data.isCoding;
+      const featNames = currentResult.feature_names || (stage0Data && stage0Data.featureNames) || null;
       container.innerHTML = shunts.map((sh, idx) => {
         const nu = nodeById.get(sh.node_u);
         const nv = nodeById.get(sh.node_v);
         const descU = summarizeCladeSpecies(nu);
         const descV = summarizeCladeSpecies(nv);
-        const codons = [...new Set((sh.sites || []).map(s => Math.floor(s / 3) + 1))];
-        const coordBadge = sh.mode === 'INTERVAL' && sh.interval_span
-          ? `Span [${sh.interval_span[0] + 1}..${sh.interval_span[1] + 1}] (${sh.sites.length} sites)`
-          : (isCoding ? `${codons.length} Convergent Codons: ${codons.join(', ')}` : `${sh.sites.length} Sites: ${sh.sites.slice(0, 10).map(s => s + 1).join(', ')}`);
+        let coordBadge = '';
+        if (sh.mode === 'INTERVAL' && sh.interval_span) {
+          coordBadge = `Span [${sh.interval_span[0] + 1}..${sh.interval_span[1] + 1}] (${sh.sites.length} sites)`;
+        } else if (alphaMode === 'protein' || alphaMode === 'translate') {
+          coordBadge = `${sh.sites.length} Convergent AA Residues: ${sh.sites.slice(0, 12).map(s => s + 1).join(', ')}`;
+        } else if (alphaMode === 'binary' || alphaMode === 'discrete' || alphaMode === 'ordered') {
+          const flist = sh.sites.slice(0, 8).map(s => (featNames && featNames[s]) ? featNames[s] : `#${s + 1}`).join(', ');
+          coordBadge = `${sh.sites.length} Parallel Loci: ${flist}`;
+        } else if (isCoding) {
+          const codons = [...new Set((sh.sites || []).map(s => Math.floor(s / 3) + 1))];
+          coordBadge = `${codons.length} Convergent Codons: ${codons.join(', ')}`;
+        } else {
+          coordBadge = `${sh.sites.length} Sites: ${sh.sites.slice(0, 10).map(s => s + 1).join(', ')}`;
+        }
+        const inspectLabel = (alphaMode === 'protein' || alphaMode === 'translate')
+          ? 'Inspect Residue Forensics →'
+          : ((alphaMode === 'binary' || alphaMode === 'discrete' || alphaMode === 'ordered') ? 'Inspect Feature/Locus Forensics →' : 'Inspect Codon/Site Forensics →');
 
         return `
           <div class="shunt-card" onclick="openStage2Drawer(${idx})">
@@ -5075,7 +5464,7 @@
             </div>
             <div style="display:flex; justify-content:space-between; align-items:center; gap:8px; flex-wrap:wrap;">
               <span class="mono" style="font-size:12px; color:var(--orange); font-weight:600;">${escapeHtml(coordBadge)}</span>
-              <span style="font-size:12px; font-weight:600; color:var(--ink);">Inspect Codon/Site Forensics →</span>
+              <span style="font-size:12px; font-weight:600; color:var(--ink);">${inspectLabel}</span>
             </div>
           </div>`;
       }).join('');
@@ -5096,6 +5485,7 @@
       const sh = currentResult.shunts[shuntIdx];
       const nu = nodeById.get(sh.node_u);
       const nv = nodeById.get(sh.node_v);
+      const alphaMode = currentResult.alphabet_mode || (stage0Data && stage0Data.alphabet) || 'nucleotide';
 
       const badge = document.getElementById('s2DrawerBadge');
       badge.className = sh.mode === 'SPARSE' ? 'badge purple' : 'badge blue';
@@ -5106,7 +5496,7 @@
       document.getElementById('s2DrawerHeadline').textContent =
         sh.mode === 'SPARSE'
           ? `Certified SPARSE Molecular Convergence (+${sh.net_mdl_gain_nats.toFixed(2)} nats net compression)`
-          : `Certified INTERVAL Horizontal Gene Transfer / Recombination Tract (+${sh.net_mdl_gain_nats.toFixed(2)} nats net compression)`;
+          : `Certified INTERVAL Horizontal Transfer / Segmental Tract (+${sh.net_mdl_gain_nats.toFixed(2)} nats net compression)`;
 
       document.getElementById('s2DrawerDesc').textContent =
         `Transmitting these ${sh.shared_mutations} parallel derived substitutions via a reticulate shunt between ${sh.label_u} and ${sh.label_v} saves +${sh.data_savings_nats.toFixed(2)} nats of parsimony description length, exceeding the ${sh.endpoint_cost_nats.toFixed(2)}-nat node-pair pointer tax and the ${sh.mask_cost_nats.toFixed(2)}-nat ${sh.mode} site-mask header.`;
@@ -5141,10 +5531,11 @@
       const spanW = Math.max(kSites, maxSite - minSite + 1);
       const sparseAltCost = universalIntNatsJS(kSites) + logBinomJS(lEff, Math.min(kSites, 0.49 * lEff));
       const intervalAltCost = 2 * Math.log(lEff) + logBinomJS(spanW, Math.min(kSites, spanW - 1));
+      const unitLbl = (alphaMode === 'protein' || alphaMode === 'translate') ? 'aa' : ((alphaMode === 'binary' || alphaMode === 'discrete' || alphaMode === 'ordered') ? 'loci' : 'bp');
       document.getElementById('s2DrawerModeProof').innerHTML =
         `Competing Mask Prefix Codes across L_eff = ${lEff.toFixed(1)}:<br/>` +
-        `&bull; <strong>SPARSE Combinadic Mask:</strong> L_sparse = ${sh.mode === 'SPARSE' ? sh.mask_cost_nats.toFixed(2) : sparseAltCost.toFixed(2)} nats (${kSites} scattered sites/codons)<br/>` +
-        `&bull; <strong>INTERVAL Contiguous Block [${minSite + 1}..${maxSite + 1}] (width w = ${spanW} bp):</strong> L_interval = ${sh.mode === 'INTERVAL' ? sh.mask_cost_nats.toFixed(2) : intervalAltCost.toFixed(2)} nats<br/>` +
+        `&bull; <strong>SPARSE Combinadic Mask:</strong> L_sparse = ${sh.mode === 'SPARSE' ? sh.mask_cost_nats.toFixed(2) : sparseAltCost.toFixed(2)} nats (${kSites} scattered positions)<br/>` +
+        `&bull; <strong>INTERVAL Contiguous Block [${minSite + 1}..${maxSite + 1}] (width w = ${spanW} ${unitLbl}):</strong> L_interval = ${sh.mode === 'INTERVAL' ? sh.mask_cost_nats.toFixed(2) : intervalAltCost.toFixed(2)} nats<br/>` +
         `&rArr; <strong>Winner: ${sh.mode}</strong> (saves ${Math.abs(intervalAltCost - sparseAltCost).toFixed(2)} nats in mask description length)`;
 
       // Clade U & V taxa lists
@@ -5155,9 +5546,11 @@
       document.getElementById('s2DrawerCladeABox').innerHTML = leavesU.map(li => escapeHtml(formatDisplayName(currentResult.names[li] || `T${li}`))).join('<br/>');
       document.getElementById('s2DrawerCladeBBox').innerHTML = leavesV.map(li => escapeHtml(formatDisplayName(currentResult.names[li] || `T${li}`))).join('<br/>');
 
-      // Site-by-site nucleotide & translated amino-acid table
+      // Site-by-site multi-alphabet state table
+      const thead = document.getElementById('s2DrawerSitesHead');
       const tbody = document.getElementById('s2DrawerSitesBody');
-      const isCoding = stage0Data && stage0Data.isCoding;
+      const isCoding = alphaMode === 'nucleotide' && stage0Data && stage0Data.isCoding;
+      const featNames = currentResult.feature_names || (stage0Data && stage0Data.featureNames) || null;
       const uSet = new Set(leavesU);
       const vSet = new Set(leavesV);
       const outIndices = [];
@@ -5165,66 +5558,152 @@
         if (!uSet.has(i) && !vSet.has(i)) outIndices.push(i);
       }
 
-      // Map currentResult.names[i] -> sequence string from stage0Data
+      // Map currentResult.names[i] -> sequence string from stage0Data (translate on-the-fly if alphaMode === 'translate')
       const nameToSeq = new Map();
       if (stage0Data && stage0Data.names) {
-        stage0Data.names.forEach((nm, idx) => nameToSeq.set(nm, stage0Data.seqs[idx]));
+        stage0Data.names.forEach((nm, idx) => {
+          const rawSeq = stage0Data.seqs[idx] || '';
+          if (alphaMode === 'translate' && stage0Data.alphabet === 'nucleotide') {
+            let aaSeq = '';
+            for (let k = 0; k + 3 <= rawSeq.length; k += 3) {
+              const c3 = rawSeq.slice(k, k + 3);
+              aaSeq += (c3.includes('-') || c3.includes('N')) ? '-' : (GENETIC_CODE[c3] || 'X');
+            }
+            nameToSeq.set(nm, aaSeq);
+          } else {
+            nameToSeq.set(nm, rawSeq);
+          }
+        });
       }
 
-      function modalCodonAndSiteState(leafList, site0) {
-        const codonStart = Math.floor(site0 / 3) * 3;
-        const baseCounts = new Map();
-        const codonCounts = new Map();
-        for (const li of leafList) {
-          const seq = nameToSeq.get(currentResult.names[li]);
-          if (!seq) continue;
-          const b = seq[site0] || '-';
-          if (b !== '-' && b !== 'N') baseCounts.set(b, (baseCounts.get(b) || 0) + 1);
-          if (isCoding && codonStart + 3 <= seq.length) {
-            const c3 = seq.slice(codonStart, codonStart + 3);
-            if (!c3.includes('-') && !c3.includes('N')) {
-              codonCounts.set(c3, (codonCounts.get(c3) || 0) + 1);
+      if (alphaMode === 'protein' || alphaMode === 'translate') {
+        if (thead) {
+          thead.innerHTML = `<tr><th>Residue</th><th>Dayhoff Class (U / Out)</th><th>Clade U AA</th><th>Clade V AA</th><th>Outgroup AA</th><th>Biochemical Annotation</th></tr>`;
+        }
+        const modalResidue = (leafList, site0) => {
+          const counts = new Map();
+          for (const li of leafList) {
+            const seq = nameToSeq.get(currentResult.names[li]);
+            if (!seq) continue;
+            const ch = seq[site0] || '-';
+            if (ch !== '-' && ch !== 'X' && ch !== '?' && ch !== '.') counts.set(ch, (counts.get(ch) || 0) + 1);
+          }
+          let best = '—', mx = 0;
+          counts.forEach((c, k) => { if (c > mx) { mx = c; best = k; } });
+          return best;
+        };
+        tbody.innerHTML = (sh.sites || []).slice(0, 60).map(s0 => {
+          const aaU = modalResidue(leavesU, s0);
+          const aaV = modalResidue(leavesV, s0);
+          const aaOut = modalResidue(outIndices, s0);
+          const clsU = AA_DAYHOFF_CLASS[aaU] || '—';
+          const clsOut = AA_DAYHOFF_CLASS[aaOut] || '—';
+          const note = (aaU !== '—' && aaU === aaV && aaU !== aaOut)
+            ? `<span class="badge purple">Convergent AA Substitution ${escapeHtml(aaOut)}${s0 + 1}${escapeHtml(aaU)}</span>`
+            : `Parallel residue change (${escapeHtml(aaOut)} &rarr; ${escapeHtml(aaU)}/${escapeHtml(aaV)})`;
+          return `
+            <tr>
+              <td class="mono">${s0 + 1}</td>
+              <td style="font-size:11.5px;">${escapeHtml(clsU)} &larr; ${escapeHtml(clsOut)}</td>
+              <td class="mono"><strong>${escapeHtml(aaU)}</strong></td>
+              <td class="mono"><strong>${escapeHtml(aaV)}</strong></td>
+              <td class="mono" style="color:var(--ink-secondary);"><strong>${escapeHtml(aaOut)}</strong></td>
+              <td>${note}</td>
+            </tr>`;
+        }).join('');
+      } else if (alphaMode === 'binary' || alphaMode === 'discrete' || alphaMode === 'ordered') {
+        if (thead) {
+          thead.innerHTML = `<tr><th>Locus</th><th>Feature / Driver Gene</th><th>Clade U State</th><th>Clade V State</th><th>Outgroup State</th><th>Somatic / Character Annotation</th></tr>`;
+        }
+        const modalState = (leafList, site0) => {
+          const counts = new Map();
+          for (const li of leafList) {
+            const seq = nameToSeq.get(currentResult.names[li]);
+            if (!seq) continue;
+            const ch = seq[site0] || '-';
+            if (ch !== '-' && ch !== '?' && ch !== '.') counts.set(ch, (counts.get(ch) || 0) + 1);
+          }
+          let best = '—', mx = 0;
+          counts.forEach((c, k) => { if (c > mx) { mx = c; best = k; } });
+          return best;
+        };
+        tbody.innerHTML = (sh.sites || []).slice(0, 60).map(s0 => {
+          const stU = modalState(leavesU, s0);
+          const stV = modalState(leavesV, s0);
+          const stOut = modalState(outIndices, s0);
+          const fname = (featNames && featNames[s0]) ? featNames[s0] : `Feature_${s0 + 1}`;
+          const note = (stU !== '—' && stU === stV && stU !== stOut)
+            ? `<span class="badge blue">Parallel State Shift (${escapeHtml(stOut)} &rarr; ${escapeHtml(stU)})</span>`
+            : `Shared character synapomorphy`;
+          return `
+            <tr>
+              <td class="mono">${s0 + 1}</td>
+              <td class="mono"><strong>${escapeHtml(fname)}</strong></td>
+              <td class="mono"><strong>${escapeHtml(stU)}</strong></td>
+              <td class="mono"><strong>${escapeHtml(stV)}</strong></td>
+              <td class="mono" style="color:var(--ink-secondary);">${escapeHtml(stOut)}</td>
+              <td>${note}</td>
+            </tr>`;
+        }).join('');
+      } else {
+        if (thead) {
+          thead.innerHTML = `<tr><th>Site</th><th>Codon</th><th>Clade U State</th><th>Clade V State</th><th>Outgroup State</th><th>Annotation</th></tr>`;
+        }
+        function modalCodonAndSiteState(leafList, site0) {
+          const codonStart = Math.floor(site0 / 3) * 3;
+          const baseCounts = new Map();
+          const codonCounts = new Map();
+          for (const li of leafList) {
+            const seq = nameToSeq.get(currentResult.names[li]);
+            if (!seq) continue;
+            const b = seq[site0] || '-';
+            if (b !== '-' && b !== 'N') baseCounts.set(b, (baseCounts.get(b) || 0) + 1);
+            if (isCoding && codonStart + 3 <= seq.length) {
+              const c3 = seq.slice(codonStart, codonStart + 3);
+              if (!c3.includes('-') && !c3.includes('N')) {
+                codonCounts.set(c3, (codonCounts.get(c3) || 0) + 1);
+              }
             }
           }
+          let bestBase = '—', maxB = 0;
+          baseCounts.forEach((cnt, k) => { if (cnt > maxB) { maxB = cnt; bestBase = k; } });
+          let bestCodon = '', maxC = 0;
+          codonCounts.forEach((cnt, k) => { if (cnt > maxC) { maxC = cnt; bestCodon = k; } });
+          const aa = bestCodon ? (GENETIC_CODE[bestCodon] || '?') : '';
+          return { base: bestBase, codon: bestCodon, aa };
         }
-        let bestBase = '—', maxB = 0;
-        baseCounts.forEach((cnt, k) => { if (cnt > maxB) { maxB = cnt; bestBase = k; } });
-        let bestCodon = '', maxC = 0;
-        codonCounts.forEach((cnt, k) => { if (cnt > maxC) { maxC = cnt; bestCodon = k; } });
-        const aa = bestCodon ? (GENETIC_CODE[bestCodon] || '?') : '';
-        return { base: bestBase, codon: bestCodon, aa };
-      }
 
-      tbody.innerHTML = (sh.sites || []).slice(0, 60).map(s0 => {
-        const codonNum = Math.floor(s0 / 3) + 1;
-        const codonPos = (s0 % 3) + 1;
-        const stU = modalCodonAndSiteState(leavesU, s0);
-        const stV = modalCodonAndSiteState(leavesV, s0);
-        const stOut = modalCodonAndSiteState(outIndices, s0);
+        tbody.innerHTML = (sh.sites || []).slice(0, 60).map(s0 => {
+          const codonNum = Math.floor(s0 / 3) + 1;
+          const codonPos = (s0 % 3) + 1;
+          const stU = modalCodonAndSiteState(leavesU, s0);
+          const stV = modalCodonAndSiteState(leavesV, s0);
+          const stOut = modalCodonAndSiteState(outIndices, s0);
 
-        const uStr = isCoding && stU.codon ? `${stU.base} (${stU.codon} &rarr; <strong>${stU.aa}</strong>)` : `<strong>${stU.base}</strong>`;
-        const vStr = isCoding && stV.codon ? `${stV.base} (${stV.codon} &rarr; <strong>${stV.aa}</strong>)` : `<strong>${stV.base}</strong>`;
-        const outStr = isCoding && stOut.codon ? `${stOut.base} (${stOut.codon} &rarr; <strong>${stOut.aa}</strong>)` : `<strong>${stOut.base}</strong>`;
+          const uStr = isCoding && stU.codon ? `${stU.base} (${stU.codon} &rarr; <strong>${stU.aa}</strong>)` : `<strong>${stU.base}</strong>`;
+          const vStr = isCoding && stV.codon ? `${stV.base} (${stV.codon} &rarr; <strong>${stV.aa}</strong>)` : `<strong>${stV.base}</strong>`;
+          const outStr = isCoding && stOut.codon ? `${stOut.base} (${stOut.codon} &rarr; <strong>${stOut.aa}</strong>)` : `<strong>${stOut.base}</strong>`;
 
-        let note = 'Parallel nucleotide synapomorphy';
-        if (isCoding && stU.aa && stV.aa && stOut.aa) {
-          if (stU.aa === stV.aa && stU.aa !== stOut.aa) {
-            note = `<span class="badge purple">Convergent AA Substitution ${stOut.aa}${codonNum}${stU.aa}</span>`;
-          } else if (stU.base === stV.base) {
-            note = `Shared derived nucleotide (${stOut.base} &rarr; ${stU.base})`;
+          let note = 'Parallel nucleotide synapomorphy';
+          if (isCoding && stU.aa && stV.aa && stOut.aa) {
+            if (stU.aa === stV.aa && stU.aa !== stOut.aa) {
+              note = `<span class="badge purple">Convergent AA Substitution ${stOut.aa}${codonNum}${stU.aa}</span>`;
+            } else if (stU.base === stV.base) {
+              note = `Shared derived nucleotide (${stOut.base} &rarr; ${stU.base})`;
+            }
           }
-        }
 
-        return `
-          <tr>
-            <td class="mono">${s0 + 1}</td>
-            <td class="mono">${isCoding ? `Codon ${codonNum} (pos ${codonPos})` : '—'}</td>
-            <td class="mono">${uStr}</td>
-            <td class="mono">${vStr}</td>
-            <td class="mono" style="color:var(--ink-secondary);">${outStr}</td>
-            <td>${note}</td>
-          </tr>`;
-      }).join('');
+          return `
+            <tr>
+              <td class="mono">${s0 + 1}</td>
+              <td class="mono">${isCoding ? `Codon ${codonNum} (pos ${codonPos})` : '—'}</td>
+              <td class="mono">${uStr}</td>
+              <td class="mono">${vStr}</td>
+              <td class="mono" style="color:var(--ink-secondary);">${outStr}</td>
+              <td>${note}</td>
+            </tr>`;
+        }).join('');
+      }
 
       document.getElementById('s2DrawerBackdrop').classList.add('open');
     };
@@ -5397,7 +5876,9 @@
       const fasta = buildCuratedStage0Fasta();
       if (!fasta) return alert('No admitted sequences available to export.');
       const base = (currentDatasetLabel || 'alignment').replace(/\.[^.]+$/, '');
-      downloadBlob(`${base}.curated.fasta`, fasta, 'chemical/x-fasta');
+      const isCsvOut = stage0Data && (stage0Data.alphabet === 'binary' || stage0Data.alphabet === 'discrete' || stage0Data.alphabet === 'ordered') && stage0Data.featureNames;
+      const ext = isCsvOut ? 'curated.csv' : (stage0Data && (stage0Data.alphabet === 'protein' || stage0Data.alphabet === 'translate') ? 'curated.faa' : 'curated.fasta');
+      downloadBlob(`${base}.${ext}`, fasta, isCsvOut ? 'text/csv;charset=utf-8' : 'chemical/x-fasta');
     };
 
     window.exportNewickFile = function() {
@@ -5448,7 +5929,7 @@
 
     window.exportLosslessBwzArchive = async function() {
       if (!currentResult || !currentCuratedFasta || !currentResultJsonStr) {
-        alert('Run Stage 1 tree induction on a sequence alignment first before exporting a lossless .bwz archive.');
+        alert('Run Stage 1 tree induction on a sequence or character matrix first before exporting a lossless .bwz archive.');
         return;
       }
       try {
@@ -5512,6 +5993,8 @@
       if (sel && sel.querySelector(`option[value="${presetId}"]`)) {
         sel.value = presetId;
       }
+      const dmSel = document.getElementById('s0DataModeSelect');
+      if (dmSel) dmSel.value = 'auto';
 
       try {
         document.getElementById('wasmLed').className = 'status-dot busy';
@@ -5519,6 +6002,16 @@
           currentDatasetLabel = `${presetId}.fasta`;
           const resp = await fetch(`./examples/${presetId}.fasta`);
           if (!resp.ok) throw new Error(`HTTP ${resp.status} loading ./examples/${presetId}.fasta`);
+          currentRawText = await resp.text();
+        } else if (presetId === 'prestin_aa') {
+          currentDatasetLabel = 'prestin_protein.faa';
+          const resp = await fetch('./examples/prestin_protein.faa');
+          if (!resp.ok) throw new Error(`HTTP ${resp.status} loading ./examples/prestin_protein.faa`);
+          currentRawText = await resp.text();
+        } else if (presetId === 'aml_binary') {
+          currentDatasetLabel = 'aml_clones_binary.csv';
+          const resp = await fetch('./examples/aml_clones_binary.csv');
+          if (!resp.ok) throw new Error(`HTTP ${resp.status} loading ./examples/aml_clones_binary.csv`);
           currentRawText = await resp.text();
         } else if (presetId === 'polytomy') {
           currentDatasetLabel = 'polytomy_benchmark_64x600.fasta';
@@ -5577,6 +6070,8 @@
       currentRawText = rawText;
       currentDatasetLabel = label;
       autoAdvanceChain = Boolean(fullAuto);
+      const dmSel = document.getElementById('s0DataModeSelect');
+      if (dmSel) dmSel.value = 'auto';
       setCustomDropdownLabel(label);
       flushAnalysisResults(0);
       switchView('stage0');

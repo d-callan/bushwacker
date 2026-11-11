@@ -5,8 +5,8 @@ export class WasmBushwhacker {
     free(): void;
     [Symbol.dispose](): void;
     /**
-     * Compress an alignment (`fasta_text`) and its JSON-serialized `BushwhackerResult`
-     * into a self-contained, bit-for-bit lossless `.bwz` binary archive.
+     * Compress an alignment or character matrix (`fasta_text`) and its JSON-serialized
+     * `BushwhackerResult` into a self-contained, bit-for-bit lossless `.bwz` binary archive.
      */
     compress_bwz(fasta_text: string, result_json: string): Uint8Array;
     /**
@@ -14,8 +14,13 @@ export class WasmBushwhacker {
      */
     decompress_bwz(bwz_bytes: Uint8Array | number[]): string;
     /**
-     * Induce an MDL phylogenetic graph from a FASTA/PHYLIP/NEXUS alignment string and return
-     * a JSON-serialized `BushwhackerResult`.
+     * Induce an MDL phylogenetic graph with explicit or auto-detected data modality
+     * (`auto`, `nucleotide`, `protein`, `translate`, `binary`, `discrete`, `ordered`).
+     */
+    infer_alignment(input_text: string, data_mode: string, coding_aware: boolean, detect_shunts: boolean, min_shunt_sites: number): string;
+    /**
+     * Backwards-compatible entrypoint that auto-detects Nucleotide, Protein, Binary (`0/1`),
+     * or Discrete/Ordered CSV/TSV matrices.
      */
     infer_fasta(fasta_text: string, coding_aware: boolean, detect_shunts: boolean, min_shunt_sites: number): string;
     constructor();
@@ -28,6 +33,7 @@ export interface InitOutput {
     readonly __wbg_wasmbushwhacker_free: (a: number, b: number) => void;
     readonly wasmbushwhacker_compress_bwz: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly wasmbushwhacker_decompress_bwz: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly wasmbushwhacker_infer_alignment: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number, number];
     readonly wasmbushwhacker_infer_fasta: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
     readonly wasmbushwhacker_new: () => number;
     readonly __wbindgen_externrefs: WebAssembly.Table;
