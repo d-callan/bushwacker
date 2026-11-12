@@ -12,8 +12,102 @@ export class WasmBushwhacker {
         wasm.__wbg_wasmbushwhacker_free(ptr, 0);
     }
     /**
-     * Induce an MDL phylogenetic graph from a FASTA alignment string and return
-     * a JSON-serialized `BushwhackerResult`.
+     * Compress an alignment or character matrix (`fasta_text`) and its JSON-serialized
+     * `BushwhackerResult` into a self-contained, bit-for-bit lossless `.bwz` binary archive.
+     * @param {string} fasta_text
+     * @param {string} result_json
+     * @returns {Uint8Array}
+     */
+    compress_bwz(fasta_text, result_json) {
+        let ptr0, len0, ptr1, len1;
+        try {
+            ptr0 = passStringToWasm0(fasta_text, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            len0 = WASM_VECTOR_LEN;
+            ptr1 = passStringToWasm0(result_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            len1 = WASM_VECTOR_LEN;
+        } catch (e) {
+            if (ptr1) { wasm.__wbindgen_free(ptr1, len1 * 1, 1); }
+            if (ptr0) { wasm.__wbindgen_free(ptr0, len0 * 1, 1); }
+            throw e;
+        }
+        const ret = wasm.wasmbushwhacker_compress_bwz(this.__wbg_ptr, ptr0, len0, ptr1, len1);
+        if (ret[3]) {
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        var v3 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+        return v3;
+    }
+    /**
+     * Decompress a `.bwz` binary archive back into a JSON object `{ fasta, newick, n_taxa, n_sites }`.
+     * @param {Uint8Array | number[]} bwz_bytes
+     * @returns {string}
+     */
+    decompress_bwz(bwz_bytes) {
+        let deferred3_0;
+        let deferred3_1;
+        try {
+            const ptr0 = passArray8ToWasm0(bwz_bytes, wasm.__wbindgen_malloc);
+            const len0 = WASM_VECTOR_LEN;
+            const ret = wasm.wasmbushwhacker_decompress_bwz(this.__wbg_ptr, ptr0, len0);
+            var ptr2 = ret[0];
+            var len2 = ret[1];
+            if (ret[3]) {
+                ptr2 = 0; len2 = 0;
+                throw takeFromExternrefTable0(ret[2]);
+            }
+            deferred3_0 = ptr2;
+            deferred3_1 = len2;
+            return getStringFromWasm0(ptr2, len2);
+        } finally {
+            wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
+        }
+    }
+    /**
+     * Induce an MDL phylogenetic graph with explicit or auto-detected data modality
+     * (`auto`, `nucleotide`, `protein`, `translate`, `binary`, `discrete`, `ordered`).
+     * @param {string} input_text
+     * @param {string} data_mode
+     * @param {boolean} coding_aware
+     * @param {boolean} detect_shunts
+     * @param {number} min_shunt_sites
+     * @returns {string}
+     */
+    infer_alignment(input_text, data_mode, coding_aware, detect_shunts, min_shunt_sites) {
+        let deferred7_0;
+        let deferred7_1;
+        try {
+            const val3 = +coding_aware;
+            const val4 = +detect_shunts;
+            const val5 = +min_shunt_sites;
+            let ptr0, len0, ptr1, len1;
+            try {
+                ptr0 = passStringToWasm0(input_text, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+                len0 = WASM_VECTOR_LEN;
+                ptr1 = passStringToWasm0(data_mode, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+                len1 = WASM_VECTOR_LEN;
+            } catch (e) {
+                if (ptr1) { wasm.__wbindgen_free(ptr1, len1 * 1, 1); }
+                if (ptr0) { wasm.__wbindgen_free(ptr0, len0 * 1, 1); }
+                throw e;
+            }
+            const ret = wasm.wasmbushwhacker_infer_alignment(this.__wbg_ptr, ptr0, len0, ptr1, len1, val3, val4, val5);
+            var ptr6 = ret[0];
+            var len6 = ret[1];
+            if (ret[3]) {
+                ptr6 = 0; len6 = 0;
+                throw takeFromExternrefTable0(ret[2]);
+            }
+            deferred7_0 = ptr6;
+            deferred7_1 = len6;
+            return getStringFromWasm0(ptr6, len6);
+        } finally {
+            wasm.__wbindgen_free(deferred7_0, deferred7_1, 1);
+        }
+    }
+    /**
+     * Backwards-compatible entrypoint that auto-detects Nucleotide, Protein, Binary (`0/1`),
+     * or Discrete/Ordered CSV/TSV matrices.
      * @param {string} fasta_text
      * @param {boolean} coding_aware
      * @param {boolean} detect_shunts
@@ -81,6 +175,11 @@ const WasmBushwhackerFinalization = (typeof FinalizationRegistry === 'undefined'
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_wasmbushwhacker_free(ptr, 1));
 
+function getArrayU8FromWasm0(ptr, len) {
+    ptr = ptr >>> 0;
+    return getUint8ArrayMemory0().subarray(ptr / 1, ptr / 1 + len);
+}
+
 function getStringFromWasm0(ptr, len) {
     ptr = ptr >>> 0;
     return decodeText(getUint8ArrayMemory0().subarray(ptr, ptr + len));
@@ -92,6 +191,13 @@ function getUint8ArrayMemory0() {
         cachedUint8ArrayMemory0 = new Uint8Array(wasm.memory.buffer);
     }
     return cachedUint8ArrayMemory0;
+}
+
+function passArray8ToWasm0(arg, malloc) {
+    const ptr = malloc(arg.length * 1, 1) >>> 0;
+    getUint8ArrayMemory0().set(arg, ptr / 1);
+    WASM_VECTOR_LEN = arg.length;
+    return ptr;
 }
 
 function passStringToWasm0(arg, malloc, realloc) {

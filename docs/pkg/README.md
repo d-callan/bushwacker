@@ -37,7 +37,7 @@ Every proposed evolutionary structure—an internal tree split `e = (u, v)`, a m
 
 BUSHWHACKER ships with a zero-server, 100% client-side **Rust + WebAssembly** web application ([`docs/index.html`](docs/index.html)) built with the Dieter Rams / Braun industrial functionalist design language (`RhizType`) and high-DPI HTML5 `<canvas>` large-tree rendering inspired by `bigtreeviewer.net`:
 
-- **Alignment $\to$ MDL Graph Mode (Rust WASM):** Drag-and-drop any **FASTA**, **PHYLIP** (strict/relaxed, sequential/interleaved), or **NEXUS** alignment or load built-in presets (*Mammalian Prestin `N = 116`*, *Vertebrate β-Globin `N = 17`*, *Adaptive Polytomy Radiation `N = 64`*, *HGT / Recombination Mosaic `N = 24`*, *Large Radiation Stress `N = 512`*) to induce the MDL tree and reticulate shunts in milliseconds directly in the browser.
+- **Alignment & Character Matrix $\to$ MDL Graph Mode (Rust WASM):** Drag-and-drop any **Nucleotide**, **Protein (`20-state AA` or in-frame CDS `--translate`)**, or **Binary / Discrete / Ordered (`0/1` somatic mutations, copy-number states, morphological traits)** dataset in **FASTA/FAA**, **PHYLIP**, **NEXUS**, or **CSV/TSV** format—or load built-in presets (*Mammalian Prestin CDS & 20-State Protein `N = 116`*, *Human AML Single-Cell Clones Binary CSV `N = 256 × 31 genes`*, *Vertebrate β-Globin `N = 17`*, *Adaptive Polytomy Radiation `N = 64`*, *HGT / Recombination Mosaic `N = 24`*)—to induce the MDL tree, reticulate shunts, and lossless `.bwz` archive in milliseconds directly in the browser.
 - **Big-Tree Newick / NEXUS Explorer Mode:** Paste or upload arbitrary Newick or NEXUS (`BEGIN TREES;` + `TRANSLATE`) trees (or load synthetic 250 / 1,000 / 2,500-tip super-trees) with optional zero-branch-length ($\ell \le \epsilon$) polytomy contraction.
 - **Multi-Scale Visual Encoding:**
   - **Phylogram**, **Cladogram (Equal)**, and **Circular Ring** layouts with smooth pan/zoom, viewport culling, semantic Level-of-Detail (LOD) label thinning, and a live minimap navigator.
@@ -70,19 +70,29 @@ cargo build --release
 ### Usage
 
 ```text
-./target/release/bushwhacker <input.fasta|phylip|nexus> [options]
+./target/release/bushwhacker <input.fasta|faa|phy|nex|csv|tsv> [options]
 
-Supported Input Formats (auto-detected):
-  - FASTA   (.fa, .fasta, .fna)
-  - PHYLIP  (.phy, .phylip; strict 10-char or relaxed, sequential or interleaved)
-  - NEXUS   (.nex, .nexus, .nxs; DATA or CHARACTERS blocks, sequential or interleaved)
+Supported Input Formats & Alphabets (auto-detected):
+  - FASTA / FAA (.fa, .fasta, .fna, .faa; DNA, RNA, 20-state Protein, or 0/1/0-9 discrete states)
+  - PHYLIP      (.phy, .phylip; strict 10-char or relaxed, sequential or interleaved)
+  - NEXUS       (.nex, .nexus, .nxs; DATA or CHARACTERS blocks, sequential or interleaved)
+  - CSV / TSV   (.csv, .tsv; binary 0/1 somatic mutations, unordered K-state traits, ordered copy numbers)
 
 Options:
   -o, --out-newick <PATH>      Output Newick file path (with MDL branch supports & lengths)
+  -b, --out-binary <PATH>      Output strictly binary Newick file path (for iqtree3 -t)
+  -t, --contract-tree <PATH>   Contract unsupported splits & peel shunts on an input Newick tree
   -j, --out-json <PATH>        Output JSON report path (full MDL ledger, splits, & shunts)
+  -c, --compress <PATH>        Write lossless .bwz phylogenetic archive to <PATH>
+  -d, --decompress <PATH>      Decompress input .bwz archive into FASTA at <PATH>
+  --protein                    Force 20-state amino-acid MDL mode (auto-detected by default)
+  --translate                  Translate in-frame nucleotide CDS to 20-state protein before MDL
+  --discrete                   Unordered K-state discrete character-matrix MDL (2 <= K <= 32)
+  --ordered                    Ordered Wagner K-state copy-number / genotype MDL (0..K-1)
   --no-coding                  Disable automatic coding-frame 3rd-position entropy weighting
   --no-shunts                  Disable Stage 4 reticulate shunt peeling
   --min-shunt-sites <N>        Minimum parallel mutations to evaluate a shunt (default: 2)
+  -T, --threads <N>            Worker threads for parallel MDL induction (default: all cores)
   -h, --help                   Print help message
   -V, --version                Print version information
 ```
@@ -191,23 +201,36 @@ Full derivations, proofs, and multi-panel figures are available in [`paper/bushw
 ```text
 bushwacker/
 ├── Cargo.toml                             # Rust crate manifest (native rayon + wasm32 wasm-bindgen)
+├── pyproject.toml                         # maturin packaging (pip-installable CLI wheel)
+├── LICENSE                                # MIT
 ├── README.md                              # Project documentation
-├── .github/workflows/deploy-pages.yml     # GitHub Pages CI/CD workflow for docs/
+├── .github/workflows/
+│   ├── deploy-pages.yml                   # GitHub Pages CI/CD workflow for docs/
+│   └── publish-python.yml                 # Tag-driven PyPI wheel/sdist build & publish
 ├── src/
 │   ├── lib.rs                             # Native Rust + SIMD + WASM BUSHWHACKER core engine
+│   ├── protein.rs                         # 20-state amino-acid MDL engine (LG08+CAT8, Dayhoff-6)
+│   ├── discrete.rs                        # K-state discrete / ordered / binary character MDL engine
+│   ├── nt_gtr.rs                          # GTR+CAT8 continuous-time nucleotide rate-mixture MDL
 │   └── main.rs                            # Native Rust CLI binary
+├── python/
+│   └── bushwhacker/                       # Thin Python shim (binary_path(), `python -m bushwhacker`)
 ├── docs/
 │   ├── index.html                         # Interactive WebApp (Dieter Rams / Braun UI + Big-Tree Canvas)
+│   ├── worker.js                          # Web Worker for non-blocking WASM inference
 │   ├── pkg/                               # Compiled Rust WebAssembly bundle (wasm-pack)
-│   └── examples/                          # Empirical alignments (prestin.fasta, bglobin.fasta)
+│   └── examples/                          # Empirical datasets (prestin CDS/protein, bglobin, AML clones)
+├── scripts/                               # Benchmark & figure-generation harnesses (Rust binary-driven)
+├── results/                               # Executed benchmark outputs (GTDB, cancer single-cell, TOL)
+├── sim_results/                           # Synthetic simulation replicate outputs
 ├── benchmarks/
 │   ├── benchmark_results.json             # Executed 5-suite benchmark outputs
 │   ├── stress_test_results.json           # Executed stress-test outputs
 │   └── generate_report_figures.py         # Publication vector PDF figure generator
 └── paper/
-    ├── bushwhacker_report.pdf             # Compiled 17-page technical report
-    ├── bushwhacker_report.tex             # LaTeX source manuscript
-    ├── fig1_synthetic_benchmarks.pdf      # Figure 1 (4-regime synthetic benchmarks)
-    ├── fig2_empirical_compression.pdf     # Figure 2 (Empirical compression & polytomy ratios)
-    └── fig3_stress_tests.pdf              # Figure 3 (5-axis ruthless stress tests)
+    ├── main.tex / main.pdf                # Primary manuscript source
+    ├── science_main.tex / science_main.pdf# Science-format manuscript
+    ├── references.bib                     # Bibliography
+    ├── bushwhacker_report.pdf/.tex        # Original 17-page technical report
+    └── fig_*.pdf, fig[123]_*.pdf          # Publication figures
 ```

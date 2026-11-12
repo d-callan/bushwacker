@@ -1,6 +1,9 @@
 # Rust build artifacts
 /target/
 
+# Scratch data and raw external downloads
+/scratch/
+
 # Python cache
 __pycache__/
 *.py[cod]
