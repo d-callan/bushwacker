@@ -87,6 +87,7 @@ Options:
   -d, --decompress <PATH>      Decompress input .bwz archive into FASTA at <PATH>
   --protein                    Force 20-state amino-acid MDL mode (auto-detected by default)
   --translate                  Translate in-frame nucleotide CDS to 20-state protein before MDL
+  --binary                     Force unordered 2-state (0/1) discrete character MDL
   --discrete                   Unordered K-state discrete character-matrix MDL (2 <= K <= 32)
   --ordered                    Ordered Wagner K-state copy-number / genotype MDL (0..K-1)
   --no-coding                  Disable automatic coding-frame 3rd-position entropy weighting
