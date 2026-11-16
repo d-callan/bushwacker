@@ -12,6 +12,11 @@ requires-python = ">=3.9"
 license = { text = "MIT" }
 authors = [
     { name = "Sergei L. Kosakovsky Pond", email = "spond@temple.edu" },
+    { name = "Darren P. Martin" },
+    { name = "Steven Weaver" },
+    { name = "Danielle Callan" },
+    { name = "Stephanie J. K. Pond" },
+    { name = "Anton Nekrutenko" },
 ]
 keywords = ["phylogenetics", "phylogeny", "mdl", "newick", "evolution"]
 classifiers = [
@@ -22,12 +27,22 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/veg/bushwacker"
-Repository = "https://github.com/veg/bushwacker"
-"Web App" = "https://veg.github.io/bushwacker/"
+Homepage = "https://github.com/veg/bushwhacker"
+Repository = "https://github.com/veg/bushwhacker"
+"Web App" = "https://veg.github.io/bushwhacker/"
 
 [tool.maturin]
 # Ship the compiled Rust `bushwhacker` binary inside the wheel, plus the
 # pure-Python shim package under python/bushwhacker/.
 bindings = "bin"
 python-source = "python"
+exclude = [
+    "data/**",
+    "results/**",
+    "sim_results/**",
+    "benchmarks/**",
+    "paper/**",
+    "docs/**",
+    "scripts/**",
+    ".github/**",
+]

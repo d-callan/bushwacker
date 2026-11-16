@@ -495,6 +495,13 @@ fn main() {
             eprintln!("Error reading discrete character matrix '{fasta}': {e}");
             process::exit(1);
         });
+        if discrete_label == "binary" && cm.k_states > 2 {
+            eprintln!(
+                "Error: --binary expects at most 2 states (0/1), but '{}' has K={} states (use --discrete or --ordered).",
+                fasta, cm.k_states
+            );
+            process::exit(1);
+        }
         let r = infer_discrete_mdl(&engine, &cm, d_mode, starting_newick).unwrap_or_else(|e| {
             eprintln!("Error running discrete BUSHWHACKER on '{fasta}': {e}");
             process::exit(1);

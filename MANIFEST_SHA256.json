@@ -1,8 +1,12 @@
 {
   "package": "bushwhacker_science_zenodo_v1.0",
   "total_files": 527,
-  "total_bytes": 92200136,
+  "total_bytes": 92014098,
   "files": {
+    ".github/workflows/publish-python.yml": {
+      "bytes": 3219,
+      "sha256": "d98020682b277e5cc154ea9e7255c22df733196ef874d0daa99b1197a5c4c205"
+    },
     ".zenodo.json": {
       "bytes": 2886,
       "sha256": "485019e5dcfaa9ca4e1fc23d2d27b9488dac80da4d4ca40f0dd7a2c2b7e67776"
@@ -20,8 +24,8 @@
       "sha256": "e3e22675006e95d67cdbb16b0032a96f021990682b448f787510f777a1f836b2"
     },
     "Cargo.toml": {
-      "bytes": 759,
-      "sha256": "9f9c61ceb1d4495e813525f983390351b17bc313d8e3f393c0f9bad869d6fdb3"
+      "bytes": 832,
+      "sha256": "157d763167e6a28fd56045414a662701216978c2bba24060be4ffc8cad2032bf"
     },
     "DATA_SOURCES.md": {
       "bytes": 6719,
@@ -32,8 +36,8 @@
       "sha256": "2541240f6ae94575d0c5cc5cd3f64c43876145208094f27be595f8737e63d61f"
     },
     "README.md": {
-      "bytes": 17532,
-      "sha256": "e7fce03605948605db0dc2ce8e81b77e01e356c2f8989be659ff2286aa2786bb"
+      "bytes": 18206,
+      "sha256": "90a29bf60a1945c8a092d58b7403bd14ed72c103424279acb66ebfb2a3ecefe0"
     },
     "data/DATA_MANIFEST.json": {
       "bytes": 26471,
@@ -568,8 +572,8 @@
       "sha256": "fdf1b099c9c955e3c777c2a3fd92e69033f325b49a1ccc8044e524ee8aa49ba2"
     },
     "docs/pkg/README.md": {
-      "bytes": 17402,
-      "sha256": "94da35a3809ebe7632a2a21eaea1920fb383ab5dd1e77fc9b6c01712d077393d"
+      "bytes": 18633,
+      "sha256": "d25b6d6e3f7e11769d040b5c1a02c427b312b552dd7b5d776c8e08d592668f88"
     },
     "docs/pkg/bushwhacker.d.ts": {
       "bytes": 3299,
@@ -675,9 +679,13 @@
       "bytes": 28804,
       "sha256": "2ce0f9f1dad69ab331fbf1a8d0210d757f85043025f777ba01e53533c3b659c3"
     },
+    "pyproject.toml": {
+      "bytes": 1398,
+      "sha256": "1f517521409d5ec6fb23332eaf20cc0521b473dff394ea3408226fcfdc1a643f"
+    },
     "python/bushwhacker/__init__.py": {
-      "bytes": 1794,
-      "sha256": "b1efbe4b00a72365fa7a0f83d4881a138fc9d325f31a76b7f048a65986f6099e"
+      "bytes": 2350,
+      "sha256": "b12aad7d5e724a70055d984c3b92b15714a82736c8d2e7d0590ababd352bb70c"
     },
     "python/bushwhacker/__main__.py": {
       "bytes": 140,
@@ -1895,10 +1903,6 @@
       "bytes": 12219,
       "sha256": "209b69cc3efe6645bbbe873060772a13561bc29d25a1254649003b9de6937dd3"
     },
-    "scripts/benchmarks/benchmark_first_principles.py": {
-      "bytes": 35271,
-      "sha256": "a6ebf8c70661296fd66bf3c0d67bba6d485cdb0c9833f37a8e347d7ac4b952d7"
-    },
     "scripts/benchmarks/deep_mine_toga2_proteome.py": {
       "bytes": 18949,
       "sha256": "085654b8f4d138bafeb8435991d7ed769d24597e176b40575fca3d8f67ed434f"
@@ -2015,10 +2019,6 @@
       "bytes": 456,
       "sha256": "2bf4494fbc815af965e5015430c8dd68cfaf4ffa2df796e460f9d6c9ebc62ddf"
     },
-    "scripts/benchmarks/stress_test_vs_paradigms.py": {
-      "bytes": 55177,
-      "sha256": "3e6d6baf59df4c2869b0d57c7915e1382ab194758531a95d77565e302d22c7d1"
-    },
     "scripts/benchmarks/submit_toga2_bushwhacker.slurm": {
       "bytes": 467,
       "sha256": "7102593206d4199a03ebd9e5e7c8d9ac975322022c7e8df890b7406708704344"
@@ -2096,12 +2096,12 @@
       "sha256": "6608d9dd698b31b84a06726f959ad625c880c6a1b9cb4d7ff44f5a78fdfbaa20"
     },
     "src/lib.rs": {
-      "bytes": 404993,
-      "sha256": "865b82eda11efd3b6eac6a2d92f4e10e0c3c4c4ae7324f8b29c4cb7150ffef5b"
+      "bytes": 405206,
+      "sha256": "bf9f427b59eb5b548f9cbcc47df43c68e94d71aad3c64f1fedded0c1a01d8736"
     },
     "src/main.rs": {
-      "bytes": 24511,
-      "sha256": "2e50383873462ec49afeb41a6da675bd296dee53d4e8d4e4b76e1b97f94fe03d"
+      "bytes": 27647,
+      "sha256": "96210c9f694c0718852690c2314e4aacd37f6a8934bbe55e245f6b31a8de6901"
     },
     "src/nt_gtr.rs": {
       "bytes": 68706,

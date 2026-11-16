@@ -2,7 +2,7 @@ name: Build & Publish Python wheels
 
 on:
   push:
-    # Tag scheme: buswhacker-v<semver>, e.g. buswhacker-v0.1.0
+    # Tag scheme: bushwhacker-v<semver>, e.g. bushwhacker-v0.1.0
     tags: ["bushwhacker-v*"]
   workflow_dispatch:
 
@@ -35,12 +35,16 @@ jobs:
       matrix:
         include:
           - { os: ubuntu-latest, target: x86_64 }
+          - { os: ubuntu-24.04-arm, target: aarch64 }
           - { os: macos-latest, target: x86_64 }
           - { os: macos-latest, target: aarch64 }
           - { os: windows-latest, target: x64 }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
@@ -48,6 +52,17 @@ jobs:
           args: --release --out dist
           sccache: "true"
           manylinux: auto
+      - name: Smoke test wheel
+        shell: bash
+        run: |
+          python3 -m venv .smoke || python -m venv .smoke
+          if [ -x .smoke/bin/python ]; then PY=.smoke/bin/python; else PY=.smoke/Scripts/python.exe; fi
+          "$PY" -m pip install --no-index --find-links dist bushwhacker
+          out=$("$PY" -m bushwhacker --version)
+          echo "$out"
+          cargo_ver=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          [[ "$out" == "bushwhacker $cargo_ver" ]]
+          rm -rf .smoke
       - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:
