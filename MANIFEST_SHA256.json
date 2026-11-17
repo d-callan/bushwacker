@@ -1,11 +1,11 @@
 {
   "package": "bushwhacker_science_zenodo_v1.0",
   "total_files": 527,
-  "total_bytes": 92046765,
+  "total_bytes": 92046766,
   "files": {
     ".github/workflows/publish-python.yml": {
-      "bytes": 3449,
-      "sha256": "459770a77aba1f0fbfea6259debd9aadfca4098549298f2c0205ecc611a34b48"
+      "bytes": 3450,
+      "sha256": "f1674dc55a9dc4840109bef16bdf23a41288fbe71fb9e24426105ee2e4834933"
     },
     ".zenodo.json": {
       "bytes": 2886,

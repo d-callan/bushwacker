@@ -104,7 +104,7 @@ jobs:
           python -m pip install --upgrade twine
           twine check dist/*
       # Requires the OIDC trusted publisher registered on the `bushwhacker`
-      # PyPI project for repo veg/bushwacker + this workflow file. Tags must
+      # PyPI project for repo veg/bushwhacker + this workflow file. Tags must
       # be pushed to upstream; a tag on a fork will not match the publisher.
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
