@@ -314,9 +314,10 @@ fn serialize_json(
         .collect();
 
     format!(
-        "{{\n  \"tool\": \"BUSHWHACKER\",\n  \"version\": {},\n  \"input\": {},\n  \"alphabet_mode\": {},\n  \"k_states\": {},\n  \"feature_names\": {},\n  \"n_taxa\": {},\n  \"seq_len\": {},\n  \"raw_Description_Length_nats\": {:.2},\n  \"star_tree_MDL_nats\": {:.2},\n  \"tree_MDL_nats\": {:.2},\n  \"network_MDL_nats\": {:.2},\n  \"compression_ratio_vs_star\": {:.4},\n  \"resolved_internal_splits\": {},\n  \"max_binary_splits\": {},\n  \"polytomy_nodes\": {},\n  \"certified_shunts\": {},\n  \"runtime_sec\": {:.4},\n  \"newick\": {},\n  \"binary_newick\": {},\n  \"internal_branches\": [\n{}\n  ],\n  \"shunts\": [\n{}\n  ]\n}}\n",
+        "{{\n  \"tool\": \"BUSHWHACKER\",\n  \"version\": {},\n  \"input\": {},\n  \"alphabet\": {},\n  \"alphabet_mode\": {},\n  \"k_states\": {},\n  \"feature_names\": {},\n  \"n_taxa\": {},\n  \"seq_len\": {},\n  \"raw_Description_Length_nats\": {:.2},\n  \"star_tree_MDL_nats\": {:.2},\n  \"tree_MDL_nats\": {:.2},\n  \"network_MDL_nats\": {:.2},\n  \"compression_ratio_vs_star\": {:.4},\n  \"resolved_internal_splits\": {},\n  \"max_binary_splits\": {},\n  \"polytomy_nodes\": {},\n  \"certified_shunts\": {},\n  \"runtime_sec\": {:.4},\n  \"newick\": {},\n  \"binary_newick\": {},\n  \"internal_branches\": [\n{}\n  ],\n  \"shunts\": [\n{}\n  ]\n}}\n",
         json_escape(env!("CARGO_PKG_VERSION")),
         json_escape(fasta_path),
+        json_escape(alphabet_label),
         json_escape(alphabet_label),
         k_states,
         feature_names_json,
@@ -440,6 +441,7 @@ fn main() {
             }
             "--discrete" => {
                 discrete_mode = Some(DiscreteMode::Unordered);
+                discrete_label = "discrete";
             }
             "--ordered" => {
                 discrete_mode = Some(DiscreteMode::Ordered);
@@ -529,7 +531,7 @@ fn main() {
         if let Some((flag, _)) = conflicts.iter().find(|(_, set)| *set) {
             eprintln!(
                 "Error: {flag} has no effect with --decompress \
-                 (usage: bushwacker <in.bwz> -d <out.fa> [-o tree.nwk])."
+                 (usage: bushwhacker <in.bwz> -d <out.fa> [-o tree.nwk])."
             );
             process::exit(1);
         }

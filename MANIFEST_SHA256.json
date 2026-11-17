@@ -1,7 +1,7 @@
 {
   "package": "bushwhacker_science_zenodo_v1.0",
   "total_files": 527,
-  "total_bytes": 92036600,
+  "total_bytes": 92046289,
   "files": {
     ".github/workflows/publish-python.yml": {
       "bytes": 3219,
@@ -1996,8 +1996,8 @@
       "sha256": "30fdb614cd97e73196399d46a197f66f873a7dd132e030ef5c88913ed1461705"
     },
     "scripts/benchmarks/run_plant_kingdom_atlas.py": {
-      "bytes": 28431,
-      "sha256": "8cbb1466b0deecdf74755773c26a883673caf0f3597d671afbbfeb23186e30da"
+      "bytes": 28477,
+      "sha256": "3eb94b74064605543a0d4cfd414c90e02e511e27af9a095100cfcbc843aeab7c"
     },
     "scripts/benchmarks/run_rokas2018_benchmark.py": {
       "bytes": 23650,
@@ -2096,12 +2096,12 @@
       "sha256": "c5c1c6f1a7c534bd53961b2fb4d14389d5739f793abdf8e52d14132df29d05e6"
     },
     "src/lib.rs": {
-      "bytes": 417015,
-      "sha256": "215b1f45adad605488e15afdbf592b10cae31f386897dd0bec7d32dd719d7078"
+      "bytes": 426554,
+      "sha256": "0b482bf35a7e047fb2eab5d0a5e8261e8924f460bbccce82d1c171b9ca2143b6"
     },
     "src/main.rs": {
-      "bytes": 35126,
-      "sha256": "f7c7ad3e6cc239d2529f00a8388b7ae08b7010c0db1992c6d287baf48029f31d"
+      "bytes": 35230,
+      "sha256": "d8e8c75525ebdde98d4aead58cad51b210c18606726f61ceca9c9acab2b8626e"
     },
     "src/nt_gtr.rs": {
       "bytes": 68706,

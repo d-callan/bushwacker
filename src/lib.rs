@@ -8001,19 +8001,25 @@ impl BushwhackerEngine {
                 // for a literal quote), so it must be consumed as a quoted
                 // span rather than scanned for delimiters — otherwise e.g.
                 // 'a,b' would split the child list mid-label.
+                skip_ws(bytes, pos);
                 if *pos < bytes.len() && bytes[*pos] == b'\'' {
                     *pos += 1;
+                    let mut closed = false;
                     while *pos < bytes.len() {
                         if bytes[*pos] == b'\'' {
                             if *pos + 1 < bytes.len() && bytes[*pos + 1] == b'\'' {
                                 *pos += 2;
                             } else {
                                 *pos += 1;
+                                closed = true;
                                 break;
                             }
                         } else {
                             *pos += 1;
                         }
+                    }
+                    if !closed {
+                        return Err("Unterminated single-quoted internal label in Newick".to_string());
                     }
                 } else {
                     while *pos < bytes.len()
@@ -8030,6 +8036,7 @@ impl BushwhackerEngine {
                 let raw_name = if bytes[*pos] == b'\'' {
                     *pos += 1;
                     let mut name_bytes = Vec::new();
+                    let mut closed = false;
                     while *pos < bytes.len() {
                         if bytes[*pos] == b'\'' {
                             if *pos + 1 < bytes.len() && bytes[*pos + 1] == b'\'' {
@@ -8037,12 +8044,16 @@ impl BushwhackerEngine {
                                 *pos += 2;
                             } else {
                                 *pos += 1;
+                                closed = true;
                                 break;
                             }
                         } else {
                             name_bytes.push(bytes[*pos]);
                             *pos += 1;
                         }
+                    }
+                    if !closed {
+                        return Err("Unterminated single-quoted taxon label in Newick".to_string());
                     }
                     String::from_utf8(name_bytes).map_err(|e| e.to_string())?
                 } else {
@@ -8840,6 +8851,11 @@ pub fn compress_alignment_to_bwz(
     }
     let alphabet: Vec<u8> = alphabet_set.into_iter().collect();
     let k_alpha = alphabet.len();
+    if k_alpha == 0 || k_alpha > 64 {
+        return Err(format!(
+            "Unsupported .bwz alphabet size {k_alpha} (valid: 1..=64 distinct byte symbols)"
+        ));
+    }
     let mut alpha_idx = [0_usize; 256];
     for (i, &b) in alphabet.iter().enumerate() {
         alpha_idx[b as usize] = i;
@@ -9378,7 +9394,7 @@ pub fn decompress_alignment_from_bwz(
     }
     let mut pos = 4usize;
     let read_u32 = |buf: &[u8], p: &mut usize| -> Result<u32, String> {
-        if *p + 4 > buf.len() {
+        if buf.len() - *p < 4 {
             return Err("Unexpected EOF in .bwz header".to_string());
         }
         let v = u32::from_le_bytes([buf[*p], buf[*p + 1], buf[*p + 2], buf[*p + 3]]);
@@ -9386,7 +9402,7 @@ pub fn decompress_alignment_from_bwz(
         Ok(v)
     };
     let read_u16 = |buf: &[u8], p: &mut usize| -> Result<u16, String> {
-        if *p + 2 > buf.len() {
+        if buf.len() - *p < 2 {
             return Err("Unexpected EOF in .bwz header".to_string());
         }
         let v = u16::from_le_bytes([buf[*p], buf[*p + 1]]);
@@ -9505,7 +9521,7 @@ pub fn decompress_alignment_from_bwz(
     }
 
     let nwk_len = read_u32(&meta_raw, &mut mpos)? as usize;
-    if mpos + nwk_len > meta_raw.len() {
+    if nwk_len > meta_raw.len() - mpos {
         return Err("Truncated Newick block in .bwz metadata".to_string());
     }
     let newick = String::from_utf8(meta_raw[mpos..mpos + nwk_len].to_vec())
@@ -9515,6 +9531,8 @@ pub fn decompress_alignment_from_bwz(
     let mut is_leaf_vec = Vec::with_capacity(n_nodes);
     let mut leaf_id_vec = Vec::with_capacity(n_nodes);
     let mut parent_pidx = Vec::with_capacity(n_nodes);
+    let mut seen_leaves = vec![false; n];
+    let mut leaf_count = 0usize;
     for pidx in 0..n_nodes {
         if mpos >= meta_raw.len() {
             return Err("Truncated node table in .bwz metadata".to_string());
@@ -9531,9 +9549,23 @@ pub fn decompress_alignment_from_bwz(
                 "Invalid .bwz metadata: parent index {pid} out of range at node {pidx}"
             ));
         }
+        if is_l {
+            if lid >= n || seen_leaves[lid] {
+                return Err(format!(
+                    "Invalid .bwz metadata: leaf index {lid} out of range or duplicated at node {pidx}"
+                ));
+            }
+            seen_leaves[lid] = true;
+            leaf_count += 1;
+        }
         is_leaf_vec.push(is_l);
         leaf_id_vec.push(lid);
         parent_pidx.push(pid);
+    }
+    if leaf_count != n {
+        return Err(format!(
+            "Invalid .bwz metadata: expected {n} leaf entries, found {leaf_count}"
+        ));
     }
 
     let n_shunts = read_u16(&meta_raw, &mut mpos)? as usize;
@@ -9608,6 +9640,7 @@ pub fn decompress_alignment_from_bwz(
         if has_root_gap {
             let mut in_run = false;
             for s in 0..l {
+                eof_check(&dec)?;
                 let dg = if !in_run {
                     let p1 = ((65536 * gap_start_cnt[0]) / (gap_start_cnt[0] + gap_start_cnt[1]))
                         .clamp(1, 65535) as u32;
@@ -9643,6 +9676,7 @@ pub fn decompress_alignment_from_bwz(
         if has_root_n {
             let mut in_run = false;
             for s in 0..l {
+                eof_check(&dec)?;
                 let dn = if !in_run {
                     let p1 = ((65536 * n_start_cnt[0]) / (n_start_cnt[0] + n_start_cnt[1]))
                         .clamp(1, 65535) as u32;
@@ -9724,6 +9758,7 @@ pub fn decompress_alignment_from_bwz(
             if has_gap_diff {
                 let mut in_run = false;
                 for s in 0..l {
+                    eof_check(&dec)?;
                     let diff_g = if !in_run {
                         let p1 = ((65536 * gap_start_cnt[0]) / (gap_start_cnt[0] + gap_start_cnt[1]))
                             .clamp(1, 65535) as u32;
@@ -9759,6 +9794,7 @@ pub fn decompress_alignment_from_bwz(
             if has_n_diff {
                 let mut in_run = false;
                 for s in 0..l {
+                    eof_check(&dec)?;
                     let diff_n = if !in_run {
                         let p1 = ((65536 * n_start_cnt[0]) / (n_start_cnt[0] + n_start_cnt[1]))
                             .clamp(1, 65535) as u32;
@@ -9793,6 +9829,12 @@ pub fn decompress_alignment_from_bwz(
             .filter(|&s| !work_gap[s] && !work_n[s])
             .collect();
         let m_u = dec.decode_int_elias(24000);
+        if m_u > valid_sites.len() {
+            return Err(format!(
+                "Invalid .bwz payload: branch mutation count {m_u} exceeds {} valid sites",
+                valid_sites.len()
+            ));
+        }
         if m_u > 0 {
             let c_sum = (codon_counts[0] + codon_counts[1] + codon_counts[2]) as f64;
             let c_mult = [
@@ -9812,6 +9854,7 @@ pub fn decompress_alignment_from_bwz(
                 if m_rem == 0 {
                     break;
                 }
+                eof_check(&dec)?;
                 let is_mut = if m_rem == n_rem {
                     true
                 } else {
@@ -10886,5 +10929,162 @@ Clone_B2,0,0,0,1,1,1,1,?
             aa_gain_3,
             expected_aa_gain_3
         );
+    }
+
+    #[test]
+    fn test_newick_quoted_leaf_and_internal_labels_and_unterminated_err() {
+        let names = vec![
+            "taxon(1),a".to_string(),
+            "taxon:b'c".to_string(),
+            "taxon;d".to_string(),
+            "taxon 4".to_string(),
+        ];
+        let adj_in = BTreeMap::from([
+            (0usize, vec![4usize]),
+            (1, vec![4]),
+            (2, vec![5]),
+            (3, vec![5]),
+            (4, vec![0, 1, 5]),
+            (5, vec![2, 3, 4]),
+        ]);
+        let eng = BushwhackerEngine::default();
+        let nwk = eng.serialize_newick(&adj_in, &names, &[], 4);
+        assert!(nwk.contains("'taxon(1),a'") && nwk.contains("'taxon:b''c'"));
+        let (_adj_rt, _) = BushwhackerEngine::parse_newick_to_unrooted_adj(&nwk, &names)
+            .expect("Serialized quoted leaf labels must round-trip cleanly");
+
+        // Quoted internal node labels with delimiters/escaped quotes must also parse cleanly
+        let nwk_int = "(('taxon(1),a':0.1,'taxon:b''c':0.2)'int(1,2):''x':0.3,'taxon;d':0.4,'taxon 4':0.5);";
+        let (adj_int, _) = BushwhackerEngine::parse_newick_to_unrooted_adj(nwk_int, &names)
+            .expect("Quoted internal node labels with delimiters must parse cleanly");
+        assert!(adj_int.len() >= 5);
+
+        // Unterminated quotes must return Err rather than silently succeeding
+        let bad_leaf = "(('taxon(1),a':0.1,'taxon:b''c':0.2),'taxon;d':0.4,'taxon 4);";
+        assert!(BushwhackerEngine::parse_newick_to_unrooted_adj(bad_leaf, &names).is_err());
+        let bad_int = "(('taxon(1),a':0.1,'taxon:b''c':0.2),'taxon;d':0.4,'taxon 4':0.5)'unclosed;";
+        assert!(BushwhackerEngine::parse_newick_to_unrooted_adj(bad_int, &names).is_err());
+    }
+
+    #[test]
+    fn test_bwz_hardening_rejects_corrupt_and_hostile_headers() {
+        let names = vec!["T1".to_string(), "T2".to_string(), "T3".to_string(), "T4".to_string()];
+        let seqs = vec![
+            "ACGTACGTACGT".to_string(),
+            "ACGTACGTACGT".to_string(),
+            "TGCATGCATGCA".to_string(),
+            "TGCATGCATGCA".to_string(),
+        ];
+        let eng = BushwhackerEngine::default();
+        let res = eng.infer(&names, &seqs).expect("Baseline infer should succeed");
+        let (bwz_ok, _) =
+            compress_alignment_to_bwz(&names, &seqs, &res).expect("Valid .bwz encode should work");
+
+        // Truncated archives fail cleanly
+        for trunc in [4usize, 26, bwz_ok.len().saturating_sub(3)] {
+            assert!(decompress_alignment_from_bwz(&bwz_ok[..trunc]).is_err());
+        }
+
+        // k_alpha > 256 rejected
+        let mut bad_k = bwz_ok.clone();
+        bad_k[16..18].copy_from_slice(&300_u16.to_le_bytes());
+        assert!(decompress_alignment_from_bwz(&bad_k).is_err());
+
+        // Hostile huge L with tiny metadata/payload must bail early via eof_check (<256 phantom bits)
+        let mut meta_raw = Vec::new();
+        let mnames = b"A\nB";
+        meta_raw.extend_from_slice(&(mnames.len() as u32).to_le_bytes());
+        meta_raw.extend_from_slice(mnames);
+        let mnwk = b"(A,B);";
+        meta_raw.extend_from_slice(&(mnwk.len() as u32).to_le_bytes());
+        meta_raw.extend_from_slice(mnwk);
+        // 3 nodes: root internal (0), leaf 0 (1), leaf 1 (2)
+        for &(is_l, lid, pid) in &[(0u8, 0u32, 0u32), (1u8, 0u32, 0u32), (1u8, 1u32, 0u32)] {
+            meta_raw.push(is_l);
+            meta_raw.extend_from_slice(&lid.to_le_bytes());
+            meta_raw.extend_from_slice(&pid.to_le_bytes());
+        }
+        meta_raw.extend_from_slice(&0_u16.to_le_bytes()); // n_shunts = 0
+        let meta_comp = arith_compress_bytes_order0(&meta_raw);
+
+        let build_hostile = |l_decl: u32, node_table_override: Option<&[u8]>| -> Vec<u8> {
+            let mut mr = meta_raw.clone();
+            if let Some(ov) = node_table_override {
+                let off = 4 + mnames.len() + 4 + mnwk.len();
+                mr.splice(off..off + ov.len(), ov.iter().copied());
+            }
+            let mc = arith_compress_bytes_order0(&mr);
+            let mut pkt = Vec::new();
+            pkt.extend_from_slice(b"BWZ1");
+            pkt.extend_from_slice(&2_u32.to_le_bytes()); // n=2
+            pkt.extend_from_slice(&l_decl.to_le_bytes()); // l
+            pkt.extend_from_slice(&3_u32.to_le_bytes()); // n_nodes=3
+            pkt.extend_from_slice(&2_u16.to_le_bytes()); // k_alpha=2
+            pkt.extend_from_slice(b"AC");
+            pkt.extend_from_slice(&(mr.len() as u32).to_le_bytes());
+            pkt.extend_from_slice(&(mc.len() as u32).to_le_bytes());
+            pkt.extend_from_slice(&mc);
+            // Non-zero bytes cause regular arithmetic rescaling across sites so a 4-byte
+            // payload cannot satisfy a 20,000-site alignment and bails via eof_check.
+            let tiny_payload = [0xAA_u8; 4];
+            pkt.extend_from_slice(&(tiny_payload.len() as u32).to_le_bytes());
+            pkt.extend_from_slice(&tiny_payload);
+            pkt
+        };
+
+        // Huge L hits per-dim / grid caps without allocating; medium L with tiny payload bails fast via eof_check
+        let hostile_huge_l = build_hostile(u32::MAX, None);
+        assert!(decompress_alignment_from_bwz(&hostile_huge_l).is_err());
+        let hostile_trunc_loop = build_hostile(20_000, None);
+        assert!(decompress_alignment_from_bwz(&hostile_trunc_loop).is_err());
+
+        // Duplicate leaf_id (both leaves claiming lid=0) rejected explicitly
+        let mut dup_nodes = Vec::new();
+        for &(is_l, lid, pid) in &[(0u8, 0u32, 0u32), (1u8, 0u32, 0u32), (1u8, 0u32, 0u32)] {
+            dup_nodes.push(is_l);
+            dup_nodes.extend_from_slice(&lid.to_le_bytes());
+            dup_nodes.extend_from_slice(&pid.to_le_bytes());
+        }
+        let hostile_dup = build_hostile(4, Some(&dup_nodes));
+        assert!(decompress_alignment_from_bwz(&hostile_dup).is_err());
+
+        // Out-of-bounds leaf_id (lid=5 >= n=2) rejected explicitly
+        let mut oob_nodes = Vec::new();
+        for &(is_l, lid, pid) in &[(0u8, 0u32, 0u32), (1u8, 0u32, 0u32), (1u8, 5u32, 0u32)] {
+            oob_nodes.push(is_l);
+            oob_nodes.extend_from_slice(&lid.to_le_bytes());
+            oob_nodes.extend_from_slice(&pid.to_le_bytes());
+        }
+        let hostile_oob = build_hostile(4, Some(&oob_nodes));
+        assert!(decompress_alignment_from_bwz(&hostile_oob).is_err());
+        let _ = meta_comp;
+
+        // Encoder rejects >64 distinct byte symbols (bitmask 1_u64 << sym_i capacity)
+        let sym65: String = (33u8..98u8).map(|c| c as char).collect();
+        let big_alpha_seqs = vec![sym65.clone(), sym65.clone(), sym65.clone(), sym65];
+        assert!(compress_alignment_to_bwz(&names, &big_alpha_seqs, &res).is_err());
+    }
+
+    #[test]
+    fn test_discrete_matrix_bwz_roundtrip_and_state_cap() {
+        let bad_csv = "taxon,s1\nA,0\nB,32\n";
+        assert!(discrete::parse_discrete_str(bad_csv).is_err());
+
+        let ok_csv = "taxon,f1,f2,f3,f4\nC0,0,0,0,0\nC1,1,0,0,0\nC2,1,2,0,?\nC3,1,2,10,0\n";
+        let cm = discrete::parse_discrete_str(ok_csv).expect("K=11 matrix should parse");
+        assert_eq!(cm.k_states, 11);
+        let sym_seqs = discrete_matrix_to_symbol_seqs(&cm);
+        assert_eq!(sym_seqs[2], "120?");
+        assert_eq!(sym_seqs[3], "12A0");
+
+        let eng = BushwhackerEngine::default();
+        let res = discrete::infer_discrete_mdl(&eng, &cm, discrete::DiscreteMode::Ordered, None)
+            .expect("Discrete MDL should succeed");
+        let (bwz_bytes, _) = compress_alignment_to_bwz(&cm.names, &sym_seqs, &res)
+            .expect("Compressing canonical symbol matrix should succeed");
+        let (rt_names, rt_seqs, _) =
+            decompress_alignment_from_bwz(&bwz_bytes).expect("Discrete .bwz should round-trip");
+        assert_eq!(rt_names, cm.names);
+        assert_eq!(rt_seqs, sym_seqs);
     }
 }

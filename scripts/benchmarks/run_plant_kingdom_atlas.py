@@ -38,6 +38,7 @@ from collections import Counter, defaultdict
 from concurrent.futures import ProcessPoolExecutor
 
 BUSHWHACKER_BIN = resolve_bin("BUSHWHACKER_BIN", REPO_ROOT / "target" / "release" / "bushwhacker", "bushwhacker")
+MAFFT_BIN = resolve_bin("MAFFT_BIN", "mafft")
 ROKAS_DIR = str(EXTERNAL_DIR / "rokas2018")
 RBCL_FASTA = str(ALIGNMENTS_DIR / "plant_c4_and_avian" / "rbcL_483.fasta")
 RBCL_NWK = str(ALIGNMENTS_DIR / "plant_c4_and_avian" / "rbcL_483.nwk")
