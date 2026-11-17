@@ -7996,8 +7996,31 @@ impl BushwhackerEngine {
                         break;
                     }
                 }
-                while *pos < bytes.len() && !matches!(bytes[*pos], b':' | b',' | b')' | b';') {
+                // Skip the optional internal-node label. A single-quoted
+                // label may itself contain `():;,` delimiters (with `''`
+                // for a literal quote), so it must be consumed as a quoted
+                // span rather than scanned for delimiters — otherwise e.g.
+                // 'a,b' would split the child list mid-label.
+                if *pos < bytes.len() && bytes[*pos] == b'\'' {
                     *pos += 1;
+                    while *pos < bytes.len() {
+                        if bytes[*pos] == b'\'' {
+                            if *pos + 1 < bytes.len() && bytes[*pos + 1] == b'\'' {
+                                *pos += 2;
+                            } else {
+                                *pos += 1;
+                                break;
+                            }
+                        } else {
+                            *pos += 1;
+                        }
+                    }
+                } else {
+                    while *pos < bytes.len()
+                        && !matches!(bytes[*pos], b':' | b',' | b')' | b';')
+                    {
+                        *pos += 1;
+                    }
                 }
                 id
             } else {
@@ -8679,6 +8702,18 @@ fn checked_grid<T: Clone>(rows: usize, cols: usize, fill: T) -> Result<Vec<Vec<T
     Ok(v)
 }
 
+/// Error once the decoder has requested far more bits than the stream
+/// contains. A valid stream overruns by lookahead only (< ~32 bits); the
+/// 256-bit slack mirrors the end-of-decode truncation check. Called inside
+/// decode loops so a truncated or hostile stream yields `Err` promptly
+/// instead of decoding a bounded-but-large amount of garbage first.
+fn eof_check(dec: &ArithDecoder) -> Result<(), String> {
+    if dec.eof_bits > 256 {
+        return Err("Truncated arithmetic-coded stream".to_string());
+    }
+    Ok(())
+}
+
 fn arith_decompress_bytes_order0(
     compressed: &[u8],
     out_len: usize,
@@ -8693,6 +8728,9 @@ fn arith_decompress_bytes_order0(
     out.try_reserve(out_len)
         .map_err(|e| format!("Cannot allocate {out_len} bytes for .bwz payload: {e}"))?;
     while out.len() < out_len {
+        // A corrupt stream can decode zero-length matches forever; bail once
+        // the phantom-EOF-bit slack is exhausted rather than spinning.
+        eof_check(&dec)?;
         let is_match = dec.decode_bit(match_p1) != 0;
         if is_match {
             match_p1 = ((match_p1 * 31 + 65535) >> 5).clamp(1, 65535);
@@ -9365,10 +9403,23 @@ pub fn decompress_alignment_from_bwz(
     if n == 0 || n_nodes == 0 || k_alpha == 0 {
         return Err("Invalid .bwz header (empty taxa, node table, or alphabet)".to_string());
     }
-    if n_nodes < n || n_nodes > 2 * n {
+    if n_nodes < n || n_nodes > n.saturating_mul(2) {
         return Err(format!(
             "Invalid .bwz header: node count {n_nodes} is inconsistent with {n} taxa"
         ));
+    }
+    // Per-dimension caps. The n_nodes*l product cap below bounds the decode
+    // grids, but not O(l) transients (mut_hist, per-node weights/clones,
+    // ~24 B/site) or O(n) outputs (restored_seqs Strings). 16M taxa and 256M
+    // sites are both far beyond any real alignment; transient memory at the
+    // l cap is ~6 GiB, comparable to the grid cap.
+    const MAX_BWZ_TAXA: usize = 1 << 24;
+    const MAX_BWZ_SITES: usize = 1 << 28;
+    if n > MAX_BWZ_TAXA {
+        return Err(format!("Invalid .bwz header: {n} taxa exceeds limit"));
+    }
+    if l > MAX_BWZ_SITES {
+        return Err(format!("Invalid .bwz header: {l} sites exceeds limit"));
     }
     // The sequence alphabet is over raw bytes, so k_alpha can never exceed 256.
     // Without this bound an attacker-crafted header could force a ~17 GiB
@@ -9378,7 +9429,9 @@ pub fn decompress_alignment_from_bwz(
             "Invalid .bwz header: alphabet size {k_alpha} exceeds the byte-alphabet limit"
         ));
     }
-    if pos + k_alpha > data.len() {
+    // Subtraction form: pos <= len is maintained by read_u32/read_u16, and
+    // pos + k_alpha could wrap on 32-bit targets (this crate builds for wasm).
+    if k_alpha > data.len() - pos {
         return Err("Unexpected EOF reading .bwz alphabet".to_string());
     }
     let alphabet: Vec<u8> = data[pos..pos + k_alpha].to_vec();
@@ -9391,7 +9444,7 @@ pub fn decompress_alignment_from_bwz(
 
     let meta_raw_len = read_u32(data, &mut pos)? as usize;
     let meta_comp_len = read_u32(data, &mut pos)? as usize;
-    if pos + meta_comp_len > data.len() {
+    if meta_comp_len > data.len() - pos {
         return Err("Unexpected EOF reading .bwz metadata block".to_string());
     }
     // Metadata holds taxon names, a Newick string, and the node table — far
@@ -9408,7 +9461,7 @@ pub fn decompress_alignment_from_bwz(
     pos += meta_comp_len;
 
     let seq_comp_len = read_u32(data, &mut pos)? as usize;
-    if pos + seq_comp_len > data.len() {
+    if seq_comp_len > data.len() - pos {
         return Err("Unexpected EOF reading .bwz sequence payload".to_string());
     }
     let seq_payload = &data[pos..pos + seq_comp_len];
@@ -9539,6 +9592,7 @@ pub fn decompress_alignment_from_bwz(
     let mut r_prev1 = 0_usize;
     let mut r_prev2 = 0_usize;
     for s in 0..l {
+        eof_check(&dec)?;
         let ctx = ((r_prev2 & 3) << 2) | (r_prev1 & 3);
         let sym = dec.decode_categorical(&root_ctx[ctx]);
         node_seqs[0][s] = alphabet[sym];
@@ -9653,6 +9707,7 @@ pub fn decompress_alignment_from_bwz(
     }
 
     for pidx in 1..n_nodes {
+        eof_check(&dec)?;
         let p_i = parent_pidx[pidx];
         let mut pred = node_seqs[p_i].clone();
         if let Some((donor_i, sites)) = shunt_map.get(&pidx) {
@@ -10833,4 +10888,3 @@ Clone_B2,0,0,0,1,1,1,1,?
         );
     }
 }
-
