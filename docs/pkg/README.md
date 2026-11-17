@@ -80,7 +80,8 @@ Supported Input Formats & Alphabets (auto-detected):
 
 Options:
   -o, --out-newick <PATH>      Output Newick file path (with MDL branch supports & lengths)
-  -b, --out-binary <PATH>      Output strictly binary Newick file path (for iqtree3 -t)
+  -b, --out-binary <PATH>      Output strictly binary Newick file path (for iqtree3 -t;
+                                annotated MDL tree still prints to stdout unless -o/-c)
   -t, --contract-tree <PATH>   Contract unsupported splits & peel shunts on an input Newick tree
   -j, --out-json <PATH>        Output JSON report path (full MDL ledger, splits, & shunts)
   -c, --compress <PATH>        Write lossless .bwz phylogenetic archive to <PATH>
@@ -99,6 +100,13 @@ Options:
   -h, --help                   Print help message
   -V, --version                Print version information
 ```
+
+Auto-dispatch (no mode flag needed): CSV/TSV matrices with `K <= 2` states run
+unordered binary MDL (as `--binary`); `K > 2` matrices default to **ordered**
+Wagner MDL (as `--ordered`) — pass `--discrete` to force unordered multi-state
+inference. Sequence-format 0/1 or 0..K-1 alignments route to the discrete
+engine automatically. `--decompress` accepts only `-o/--out-newick` (to extract
+the embedded tree); inference and other output flags are rejected in that mode.
 
 ### Example: Mammalian *Prestin* (`prestin.fasta`, 116 Mammals, 2,235 bp)
 

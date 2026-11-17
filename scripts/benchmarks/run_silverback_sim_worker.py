@@ -409,17 +409,13 @@ def run_task(scenario_idx: int, rep_idx: int, base_dir: Path, out_dir: Path, bw_
     if not os.path.exists(bw_bin):
         bw_bin = str(base_dir / "target" / "release" / "bushwhacker")
 
-    iqtree_bin = "/opt/ohpc/pub/apps/iqtree/2.4.0/bin/iqtree2"
-    if not os.path.exists(iqtree_bin):
-        iqtree_bin = resolve_bin("IQTREE_BIN", "iqtree2", "iqtree")
-
-    raxml_bin = "/opt/ohpc/pub/apps/raxml-ng/1.2.2/bin/raxml-ng"
-    if not os.path.exists(raxml_bin):
-        raxml_bin = shutil.which("raxml-ng") or "/opt/homebrew/bin/raxml-ng"
-
-    fasttree_bin = "/usr/local/bin/FastTree"
-    if not os.path.exists(fasttree_bin):
-        fasttree_bin = shutil.which("fasttree") or "/usr/local/bin/fasttree"
+    # All external tools resolve through _env_paths: env-var override first
+    # (IQTREE_BIN / RAXML_BIN / FASTTREE_BIN), then PATH. Upstream ships the
+    # binary as `FastTree`; bioconda keeps that name, but some installs symlink
+    # lowercase `fasttree`, so both spellings are probed.
+    iqtree_bin = resolve_bin("IQTREE_BIN", "iqtree2", "iqtree")
+    raxml_bin = resolve_bin("RAXML_BIN", "raxml-ng", "raxmlHPC")
+    fasttree_bin = resolve_bin("FASTTREE_BIN", "FastTreeMP", "FastTree", "fasttree")
 
     emp_dir = base_dir / "empirical"
 

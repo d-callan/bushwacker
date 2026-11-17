@@ -29,7 +29,8 @@ fn print_usage(prog: &str) {
            - BWZ     (.bwz; Bushwhacker lossless phylogenetic archive for --decompress)\n\n\
          Options:\n  \
            -o, --out-newick <PATH>      Output Newick file path (with MDL branch supports & lengths)\n  \
-           -b, --out-binary <PATH>      Output strictly binary Newick file path (for iqtree3 -t)\n  \
+           -b, --out-binary <PATH>      Output strictly binary Newick file path (for iqtree3 -t;\n  \
+                                         annotated MDL tree still prints to stdout unless -o/-c)\n  \
            -t, --contract-tree <PATH>   Contract unsupported splits & peel shunts on an input Newick tree\n  \
            -j, --out-json <PATH>        Output JSON report path (full MDL ledger, splits, & shunts)\n  \
            -c, --compress <PATH>        Write lossless .bwz phylogenetic archive to <PATH>\n  \
@@ -46,25 +47,22 @@ fn print_usage(prog: &str) {
            --empirical-alpha            Ablation: estimate Gamma(alpha, alpha) rate shape from Fitch steps\n  \
            -T, --threads <N>            Worker threads for parallel MDL induction (default: all cores)\n  \
            -h, --help                   Print this help message\n  \
-           -V, --version                Print version information"
+           -V, --version                Print version information\n\n\
+         Auto-dispatch (no mode flag needed):\n  \
+           - CSV/TSV matrices with K<=2 states -> unordered binary MDL (as --binary);\n  \
+             K>2 states -> ordered Wagner MDL (as --ordered). Pass --discrete to force\n  \
+             unordered multi-state inference.\n  \
+           - Sequence-format 0/1 or 0..K-1 alignments -> discrete engine automatically.\n\n\
+         Note: --decompress only accepts -o/--out-newick (to extract the embedded tree);\n  \
+           inference and other output flags are rejected in that mode."
     );
 }
 
+/// JSON-quote a string via serde_json so every control character (`\\b`, `\\f`,
+/// `\\x00`-`\\x1f`) is escaped per RFC 8259; the previous hand-rolled escaper
+/// silently emitted invalid JSON for those characters.
 fn json_escape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('"');
-    for ch in s.chars() {
-        match ch {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c => out.push(c),
-        }
-    }
-    out.push('"');
-    out
+    serde_json::to_string(s).expect("serializing a string to JSON cannot fail")
 }
 
 fn clade_leaves_for_shunt_endpoint(
@@ -189,6 +187,15 @@ fn serialize_json(res: &BushwhackerResult, fasta_path: &str, alphabet_label: &st
                 })
                 .collect::<Vec<_>>()
                 .join(", ");
+            // Residues are always raw 1-based alignment positions; previously
+            // this emitted `codons_str` a second time, reporting codon indices
+            // for nucleotide input.
+            let residues_str = s
+                .sites
+                .iter()
+                .map(|x| (x + 1).to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
             let span_str = match s.interval_span {
                 Some((a, b)) => format!("[{a}, {b}]"),
                 None => "null".to_string(),
@@ -231,7 +238,7 @@ fn serialize_json(res: &BushwhackerResult, fasta_path: &str, alphabet_label: &st
                 s.shared_mutations,
                 sites_str,
                 codons_str,
-                codons_str,
+                residues_str,
                 span_str,
                 s.data_savings_nats,
                 s.mask_cost_nats,
@@ -243,7 +250,8 @@ fn serialize_json(res: &BushwhackerResult, fasta_path: &str, alphabet_label: &st
         .collect();
 
     format!(
-        "{{\n  \"tool\": \"BUSHWHACKER\",\n  \"input\": {},\n  \"alphabet\": {},\n  \"n_taxa\": {},\n  \"seq_len\": {},\n  \"raw_Description_Length_nats\": {:.2},\n  \"star_tree_MDL_nats\": {:.2},\n  \"tree_MDL_nats\": {:.2},\n  \"network_MDL_nats\": {:.2},\n  \"compression_ratio_vs_star\": {:.4},\n  \"resolved_internal_splits\": {},\n  \"max_binary_splits\": {},\n  \"polytomy_nodes\": {},\n  \"certified_shunts\": {},\n  \"runtime_sec\": {:.4},\n  \"newick\": {},\n  \"binary_newick\": {},\n  \"internal_branches\": [\n{}\n  ],\n  \"shunts\": [\n{}\n  ]\n}}\n",
+        "{{\n  \"tool\": \"BUSHWHACKER\",\n  \"version\": {},\n  \"input\": {},\n  \"alphabet_mode\": {},\n  \"n_taxa\": {},\n  \"seq_len\": {},\n  \"raw_Description_Length_nats\": {:.2},\n  \"star_tree_MDL_nats\": {:.2},\n  \"tree_MDL_nats\": {:.2},\n  \"network_MDL_nats\": {:.2},\n  \"compression_ratio_vs_star\": {:.4},\n  \"resolved_internal_splits\": {},\n  \"max_binary_splits\": {},\n  \"polytomy_nodes\": {},\n  \"certified_shunts\": {},\n  \"runtime_sec\": {:.4},\n  \"newick\": {},\n  \"binary_newick\": {},\n  \"internal_branches\": [\n{}\n  ],\n  \"shunts\": [\n{}\n  ]\n}}\n",
+        json_escape(env!("CARGO_PKG_VERSION")),
         json_escape(fasta_path),
         json_escape(alphabet_label),
         res.n_taxa,
@@ -290,6 +298,7 @@ fn main() {
     // `alphabet_mode` vocabulary emitted by the WASM dispatcher.
     let mut discrete_label: &str = "discrete";
     let mut min_shunt_sites: usize = 2;
+    let mut min_shunt_sites_set = false;
     let mut no_mult_pen = false;
     let mut empirical_alpha = false;
     let mut num_threads: Option<usize> = None;
@@ -392,6 +401,7 @@ fn main() {
                     eprintln!("Error: invalid integer for --min-shunt-sites: {}", args[i]);
                     process::exit(1);
                 });
+                min_shunt_sites_set = true;
             }
             "-T" | "--threads" => {
                 i += 1;
@@ -430,6 +440,41 @@ fn main() {
         print_usage(prog);
         process::exit(1);
     };
+
+    // Reject flag combinations that would otherwise be silently ignored:
+    // --decompress is a pure codec path honoring only -o (embedded tree), and
+    // --protein/--translate are meaningless on discrete character matrices.
+    if out_decompress.is_some() {
+        let conflicts: &[(&str, bool)] = &[
+            ("-b/--out-binary", out_binary.is_some()),
+            ("-t/--contract-tree", contract_tree.is_some()),
+            ("-j/--out-json", out_json.is_some()),
+            ("-c/--compress", out_compress.is_some()),
+            ("--protein", force_protein),
+            ("--translate", translate_coding),
+            ("--binary/--discrete/--ordered", discrete_mode.is_some()),
+            ("--no-coding", no_coding),
+            ("--no-shunts", no_shunts),
+            ("--min-shunt-sites", min_shunt_sites_set),
+            ("--no-mult-pen", no_mult_pen),
+            ("--empirical-alpha", empirical_alpha),
+            ("-T/--threads", num_threads.is_some()),
+        ];
+        if let Some((flag, _)) = conflicts.iter().find(|(_, set)| *set) {
+            eprintln!(
+                "Error: {flag} has no effect with --decompress \
+                 (usage: bushwacker <in.bwz> -d <out.fa> [-o tree.nwk])."
+            );
+            process::exit(1);
+        }
+    }
+    if discrete_mode.is_some() && (force_protein || translate_coding) {
+        eprintln!(
+            "Error: --protein/--translate apply to sequence alignments and cannot \
+             be combined with --binary/--discrete/--ordered."
+        );
+        process::exit(1);
+    }
 
     if let Some(t) = num_threads {
         configure_thread_pool(t);
@@ -516,6 +561,13 @@ fn main() {
             process::exit(1);
         });
         if looks_like_csv_or_tsv_matrix(&input_text) {
+            if force_protein || translate_coding {
+                eprintln!(
+                    "Error: --protein/--translate require a sequence alignment; \
+                     '{fasta}' is a discrete character matrix."
+                );
+                process::exit(1);
+            }
             let cm = parse_discrete_str(&input_text).unwrap_or_else(|e| {
                 eprintln!("Error reading discrete character matrix '{fasta}': {e}");
                 process::exit(1);
@@ -637,7 +689,7 @@ fn main() {
             process::exit(1);
         });
         println!("Wrote Newick tree to: {nwk_path}");
-    } else if out_compress.is_none() && out_binary.is_none() {
+    } else if out_compress.is_none() {
         println!("\nNewick Tree:\n{}", res.newick);
     }
 

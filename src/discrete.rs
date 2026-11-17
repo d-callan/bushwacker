@@ -21,8 +21,9 @@ use std::time::Instant;
 use rayon::prelude::*;
 
 use crate::{
-    branch_mutation_code_nats, log_binom, parse_alignment_str, split_topology_cost_nats,
-    universal_int_nats, BranchRecord, BushwhackerEngine, BushwhackerResult, ShuntEdge,
+    branch_mutation_code_nats, log_binom, parse_alignment_str, quote_newick_label,
+    split_topology_cost_nats, universal_int_nats, BranchRecord, BushwhackerEngine,
+    BushwhackerResult, ShuntEdge,
 };
 
 pub const MAX_DISCRETE_STATES: usize = 32;
@@ -4514,15 +4515,15 @@ fn serialize_discrete_newick(
     n: usize,
 ) -> String {
     if n == 1 {
-        return format!("{}:0.0;", names[0]);
+        return format!("{}:0.0;", quote_newick_label(&names[0]));
     }
     if n == 2 {
         let b_len = branches.first().map(|b| b.branch_length).unwrap_or(0.0);
         return format!(
             "({}:{:.6},{}:{:.6});",
-            names[0],
+            quote_newick_label(&names[0]),
             b_len / 2.0,
-            names[1],
+            quote_newick_label(&names[1]),
             b_len / 2.0
         );
     }
@@ -4549,7 +4550,7 @@ fn serialize_discrete_newick(
     ) -> String {
         visited.insert(u);
         let label = if u < n {
-            names[u].clone()
+            quote_newick_label(&names[u])
         } else {
             let children: Vec<usize> = adj[&u]
                 .iter()
@@ -4599,10 +4600,14 @@ fn serialize_discrete_binary_newick(
     };
     let min_bl = (0.5 / l_denom.max(1.0)).max(1e-5);
     if n == 1 {
-        return format!("{}:0.000010;", names[0]);
+        return format!("{}:0.000010;", quote_newick_label(&names[0]));
     }
     if n == 2 {
-        return format!("({}:{min_bl:.6},{}:{min_bl:.6});", names[0], names[1]);
+        return format!(
+            "({}:{min_bl:.6},{}:{min_bl:.6});",
+            quote_newick_label(&names[0]),
+            quote_newick_label(&names[1])
+        );
     }
     let states =
         compute_all_directed_discrete_states(bin_adj, bitmasks, n, l, terminal_loads, subst);
@@ -4657,7 +4662,7 @@ fn serialize_discrete_binary_newick(
     ) -> String {
         visited.insert(u);
         let label = if u < n {
-            names[u].clone()
+            quote_newick_label(&names[u])
         } else {
             let children: Vec<usize> = adj[&u]
                 .iter()

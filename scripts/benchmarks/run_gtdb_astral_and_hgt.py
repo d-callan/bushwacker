@@ -43,7 +43,7 @@ WORK_DIR = GTDB_DIR / "work"
 RES_DIR = GTDB_DIR / "results"
 ASTRAL_JAR = resolve_bin("ASTRAL_JAR", EXTERNAL_DIR / "Astral" / "astral.5.7.8.jar", "astral.jar")
 BW_BIN = resolve_bin("BUSHWHACKER_BIN", REPO_ROOT / "target" / "release" / "bushwhacker", "bushwhacker")
-MAFFT_BIN = "/opt/ohpc/pub/apps/mafft/7.526/bin/mafft"
+MAFFT_BIN = resolve_bin("MAFFT_BIN", "mafft")
 
 
 def load_taxonomy(tsv_path: Path) -> dict:

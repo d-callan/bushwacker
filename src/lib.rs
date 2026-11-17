@@ -1161,6 +1161,25 @@ impl Default for BushwhackerEngine {
     }
 }
 
+/// Single-quote a taxon label for Newick output when it contains characters
+/// that are unparseable unquoted (whitespace or `()[]':;,`); embedded single
+/// quotes are doubled per the Newick convention. Labels are emitted verbatim
+/// otherwise. Without this, a FASTA header token like `taxon(1)` produced an
+/// invalid tree that downstream tools could not re-parse.
+pub(crate) fn quote_newick_label(name: &str) -> String {
+    if name.is_empty() {
+        return "''".to_string();
+    }
+    if name
+        .chars()
+        .any(|c| matches!(c, ' ' | '\t' | '(' | ')' | '[' | ']' | '\'' | ':' | ';' | ','))
+    {
+        format!("'{}'", name.replace('\'', "''"))
+    } else {
+        name.to_string()
+    }
+}
+
 impl BushwhackerEngine {
     pub fn new(coding_aware: bool, detect_shunts: bool, min_shunt_sites: usize) -> Self {
         Self {
@@ -7738,11 +7757,17 @@ impl BushwhackerEngine {
         n: usize,
     ) -> String {
         if n == 1 {
-            return format!("{}:0.0;", names[0]);
+            return format!("{}:0.0;", quote_newick_label(&names[0]));
         }
         if n == 2 {
             let b_len = branches.first().map(|b| b.branch_length).unwrap_or(0.0);
-            return format!("({}:{:.6},{}:{:.6});", names[0], b_len / 2.0, names[1], b_len / 2.0);
+            return format!(
+                "({}:{:.6},{}:{:.6});",
+                quote_newick_label(&names[0]),
+                b_len / 2.0,
+                quote_newick_label(&names[1]),
+                b_len / 2.0
+            );
         }
 
         let mut edge_map: HashMap<(usize, usize), &BranchRecord> = HashMap::new();
@@ -7770,7 +7795,7 @@ impl BushwhackerEngine {
         ) -> String {
             visited.insert(u);
             let label = if u < n {
-                names[u].clone()
+                quote_newick_label(&names[u])
             } else {
                 let children: Vec<usize> = adj[&u]
                     .iter()
@@ -7814,11 +7839,15 @@ impl BushwhackerEngine {
         gtr_edge_stats: Option<&HashMap<(usize, usize), (f64, f64)>>,
     ) -> String {
         if n == 1 {
-            return format!("{}:0.000010;", names[0]);
+            return format!("{}:0.000010;", quote_newick_label(&names[0]));
         }
         let min_bl = (0.20 / l_eff.max(1.0)).clamp(1e-6, 1e-3);
         if n == 2 {
-            return format!("({}:{min_bl:.6},{}:{min_bl:.6});", names[0], names[1]);
+            return format!(
+                "({}:{min_bl:.6},{}:{min_bl:.6});",
+                quote_newick_label(&names[0]),
+                quote_newick_label(&names[1])
+            );
         }
         let mut edge_bl: HashMap<(usize, usize), f64> = HashMap::new();
         if let Some(stats) = gtr_edge_stats {
@@ -7893,7 +7922,7 @@ impl BushwhackerEngine {
         ) -> String {
             visited.insert(u);
             let label = if u < n {
-                names[u].clone()
+                quote_newick_label(&names[u])
             } else {
                 let children: Vec<usize> = adj[&u]
                     .iter()

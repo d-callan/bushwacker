@@ -22,7 +22,7 @@ Machine-actionable instructions for AI coding, verification, and peer-review age
   - Default continuous-time rate-category models: Fixed 8-category unit-mean $\Gamma(1,1)$ octile rate models (`GTR+CAT8` DNA for $N \ge 4$ / `LG08+CAT8` Protein for $N \ge 3$) scored with Fisher/Rissanen contraction penalties (`Eq. 9`).
   - `<input.fa> -c <out.bwz>` / `<in.bwz> -d <restored.fa>`: Lossless causal arithmetic compressor & decompressor.
   - `-j <out.json>`: Structured JSON ledger (`tree_MDL_nats`, `network_MDL_nats`, `resolved_internal_splits`, `max_binary_splits`, `polytomy_nodes`, `internal_branches[]`, `shunts[]`).
-- **Benchmark path resolution:** Every script in `scripts/benchmarks/` imports `scripts/benchmarks/_env_paths.py`. No user-specific home paths (`/Users/...`, `/home/...`, `/storage/...`) are used anywhere; external tools and large public corpora can be pointed to via `BUSHWHACKER_BIN`, `IQTREE_BIN`, `FASTTREE_BIN`, `ASTRAL4_BIN`, `MAFFT_BIN`, and `EXTERNAL_CORPORA_DIR`.
+- **Benchmark path resolution:** Every script in `scripts/benchmarks/` imports `scripts/benchmarks/_env_paths.py`. No user-specific home paths (`/Users/...`, `/home/...`, `/storage/...`) are used anywhere; external tools and large public corpora can be pointed to via `BUSHWHACKER_BIN`, `IQTREE_BIN`, `RAXML_BIN`, `FASTTREE_BIN`, `ASTRAL4_BIN`, `MAFFT_BIN`, and `EXTERNAL_CORPORA_DIR`.
 
 ---
 

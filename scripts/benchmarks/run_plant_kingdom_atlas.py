@@ -408,7 +408,8 @@ def fetch_and_run_poaceae_c4_hgt():
                                     clean_codons[k] = s_trim
                                     f.write(f">{k}\n{aa_s}\n")
 
-                        subprocess.run(f"/opt/ohpc/pub/apps/mafft/7.526/bin/mafft --auto --thread 16 {aa_in} > {aa_out}", shell=True, stderr=subprocess.DEVNULL)
+                        with open(aa_out, "w", encoding="utf-8") as _aa_out_fh:
+                            subprocess.run([MAFFT_BIN, "--auto", "--thread", "16", aa_in], stdout=_aa_out_fh, stderr=subprocess.DEVNULL)
                         # Back-translate
                         aa_aln = {}
                         ch = None
