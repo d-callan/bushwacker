@@ -10,8 +10,8 @@ use bushwhacker::discrete::{
 };
 use bushwhacker::{
     compress_alignment_to_bwz, configure_thread_pool, decompress_alignment_from_bwz,
-    detect_sequence_alphabet_kind, looks_like_csv_or_tsv_matrix, parse_alignment_str,
-    BushwhackerEngine, BushwhackerResult,
+    detect_sequence_alphabet_kind, discrete_matrix_to_symbol_seqs,
+    looks_like_csv_or_tsv_matrix, parse_alignment_str, BushwhackerEngine, BushwhackerResult,
 };
 
 fn print_usage(prog: &str) {
@@ -31,7 +31,8 @@ fn print_usage(prog: &str) {
            -o, --out-newick <PATH>      Output Newick file path (with MDL branch supports & lengths)\n  \
            -b, --out-binary <PATH>      Output strictly binary Newick file path (for iqtree3 -t;\n  \
                                          annotated MDL tree still prints to stdout unless -o/-c)\n  \
-           -t, --contract-tree <PATH>   Contract unsupported splits & peel shunts on an input Newick tree\n  \
+           -t, --contract-tree <PATH>   Contract unsupported splits & peel shunts on an input\n  \
+                                         Newick tree (positional alignment argument required)\n  \
            -j, --out-json <PATH>        Output JSON report path (full MDL ledger, splits, & shunts)\n  \
            -c, --compress <PATH>        Write lossless .bwz phylogenetic archive to <PATH>\n  \
            -d, --decompress <PATH>      Decompress input .bwz archive into FASTA at <PATH>\n  \
@@ -63,6 +64,51 @@ fn print_usage(prog: &str) {
 /// silently emitted invalid JSON for those characters.
 fn json_escape(s: &str) -> String {
     serde_json::to_string(s).expect("serializing a string to JSON cannot fail")
+}
+
+/// Flags that only affect the nucleotide/protein sequence engines. The
+/// discrete character engine silently ignores them, so passing any of them on
+/// a discrete-mode invocation (explicit or auto-dispatched) is a user error
+/// worth rejecting rather than accepting.
+fn discrete_ignored_flag(
+    force_protein: bool,
+    translate_coding: bool,
+    no_coding: bool,
+    no_mult_pen: bool,
+    empirical_alpha: bool,
+) -> Option<&'static str> {
+    [
+        ("--protein", force_protein),
+        ("--translate", translate_coding),
+        ("--no-coding", no_coding),
+        ("--no-mult-pen", no_mult_pen),
+        ("--empirical-alpha", empirical_alpha),
+    ]
+    .into_iter()
+    .find(|(_, set)| *set)
+    .map(|(flag, _)| flag)
+}
+
+fn reject_discrete_ignored_flags(
+    force_protein: bool,
+    translate_coding: bool,
+    no_coding: bool,
+    no_mult_pen: bool,
+    empirical_alpha: bool,
+) {
+    if let Some(flag) = discrete_ignored_flag(
+        force_protein,
+        translate_coding,
+        no_coding,
+        no_mult_pen,
+        empirical_alpha,
+    ) {
+        eprintln!(
+            "Error: {flag} applies only to the nucleotide/protein MDL engines \
+             and has no effect on discrete character input."
+        );
+        process::exit(1);
+    }
 }
 
 fn clade_leaves_for_shunt_endpoint(
@@ -145,8 +191,23 @@ fn clade_leaves_for_shunt_endpoint(
     (0, Vec::new())
 }
 
-fn serialize_json(res: &BushwhackerResult, fasta_path: &str, alphabet_label: &str) -> String {
+fn serialize_json(
+    res: &BushwhackerResult,
+    fasta_path: &str,
+    alphabet_label: &str,
+    k_states: usize,
+    feature_names: &[String],
+) -> String {
     let one_to_one_sites = alphabet_label != "nucleotide";
+    let feature_names_json = if feature_names.is_empty() {
+        "null".to_string()
+    } else {
+        feature_names
+            .iter()
+            .map(|x| json_escape(x))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
     let internal_branches: Vec<_> = res
         .branches
         .iter()
@@ -250,10 +311,12 @@ fn serialize_json(res: &BushwhackerResult, fasta_path: &str, alphabet_label: &st
         .collect();
 
     format!(
-        "{{\n  \"tool\": \"BUSHWHACKER\",\n  \"version\": {},\n  \"input\": {},\n  \"alphabet_mode\": {},\n  \"n_taxa\": {},\n  \"seq_len\": {},\n  \"raw_Description_Length_nats\": {:.2},\n  \"star_tree_MDL_nats\": {:.2},\n  \"tree_MDL_nats\": {:.2},\n  \"network_MDL_nats\": {:.2},\n  \"compression_ratio_vs_star\": {:.4},\n  \"resolved_internal_splits\": {},\n  \"max_binary_splits\": {},\n  \"polytomy_nodes\": {},\n  \"certified_shunts\": {},\n  \"runtime_sec\": {:.4},\n  \"newick\": {},\n  \"binary_newick\": {},\n  \"internal_branches\": [\n{}\n  ],\n  \"shunts\": [\n{}\n  ]\n}}\n",
+        "{{\n  \"tool\": \"BUSHWHACKER\",\n  \"version\": {},\n  \"input\": {},\n  \"alphabet_mode\": {},\n  \"k_states\": {},\n  \"feature_names\": {},\n  \"n_taxa\": {},\n  \"seq_len\": {},\n  \"raw_Description_Length_nats\": {:.2},\n  \"star_tree_MDL_nats\": {:.2},\n  \"tree_MDL_nats\": {:.2},\n  \"network_MDL_nats\": {:.2},\n  \"compression_ratio_vs_star\": {:.4},\n  \"resolved_internal_splits\": {},\n  \"max_binary_splits\": {},\n  \"polytomy_nodes\": {},\n  \"certified_shunts\": {},\n  \"runtime_sec\": {:.4},\n  \"newick\": {},\n  \"binary_newick\": {},\n  \"internal_branches\": [\n{}\n  ],\n  \"shunts\": [\n{}\n  ]\n}}\n",
         json_escape(env!("CARGO_PKG_VERSION")),
         json_escape(fasta_path),
         json_escape(alphabet_label),
+        k_states,
+        feature_names_json,
         res.n_taxa,
         res.n_sites,
         res.raw_uncompressed_nats,
@@ -468,12 +531,14 @@ fn main() {
             process::exit(1);
         }
     }
-    if discrete_mode.is_some() && (force_protein || translate_coding) {
-        eprintln!(
-            "Error: --protein/--translate apply to sequence alignments and cannot \
-             be combined with --binary/--discrete/--ordered."
+    if discrete_mode.is_some() {
+        reject_discrete_ignored_flags(
+            force_protein,
+            translate_coding,
+            no_coding,
+            no_mult_pen,
+            empirical_alpha,
         );
-        process::exit(1);
     }
 
     if let Some(t) = num_threads {
@@ -518,7 +583,9 @@ fn main() {
         return;
     }
 
-    let mut engine = BushwhackerEngine::new(!no_coding, !no_shunts, min_shunt_sites);
+    // Clamp the shunt threshold like the WASM dispatcher does: 0 would admit
+    // every candidate endpoint pair as a shunt.
+    let mut engine = BushwhackerEngine::new(!no_coding, !no_shunts, min_shunt_sites.max(1));
     engine.force_protein = force_protein;
     engine.translate_coding = translate_coding;
     engine.discrete_mode = discrete_mode;
@@ -535,103 +602,154 @@ fn main() {
     });
     let starting_newick: Option<(&str, bool)> = starting_tree.as_deref().map(|s| (s, false));
 
-    let (names, seqs_opt, alphabet_label, res) = if let Some(d_mode) = discrete_mode {
-        let cm = parse_discrete_file(Path::new(&fasta)).unwrap_or_else(|e| {
-            eprintln!("Error reading discrete character matrix '{fasta}': {e}");
-            process::exit(1);
-        });
-        if discrete_label == "binary" && cm.k_states > 2 {
-            eprintln!(
-                "Error: --binary expects at most 2 states (0/1), but '{}' has K={} states (use --discrete or --ordered).",
-                fasta, cm.k_states
-            );
-            process::exit(1);
-        }
-        let r = infer_discrete_mdl(&engine, &cm, d_mode, starting_newick).unwrap_or_else(|e| {
-            eprintln!("Error running discrete BUSHWHACKER on '{fasta}': {e}");
-            process::exit(1);
-        });
-        (cm.names, None, discrete_label, r)
-    } else {
-        // Mirror the WASM `auto` dispatch in `infer_any_alignment_json`: CSV/TSV
-        // character matrices and 0/1 or 0..K-1 alignment-format inputs route to
-        // the discrete engine; protein and nucleotide stay on the primary engine.
-        let input_text = fs::read_to_string(&fasta).unwrap_or_else(|e| {
-            eprintln!("Error reading alignment '{fasta}': {e}");
-            process::exit(1);
-        });
-        if looks_like_csv_or_tsv_matrix(&input_text) {
-            if force_protein || translate_coding {
-                eprintln!(
-                    "Error: --protein/--translate require a sequence alignment; \
-                     '{fasta}' is a discrete character matrix."
-                );
-                process::exit(1);
-            }
-            let cm = parse_discrete_str(&input_text).unwrap_or_else(|e| {
+    let (names, seqs_opt, alphabet_label, k_states, feature_names, res) =
+        if let Some(d_mode) = discrete_mode {
+            let cm = parse_discrete_file(Path::new(&fasta)).unwrap_or_else(|e| {
                 eprintln!("Error reading discrete character matrix '{fasta}': {e}");
                 process::exit(1);
             });
-            let (d_mode, lbl) = if cm.k_states <= 2 {
-                (DiscreteMode::Unordered, "binary")
-            } else {
-                (DiscreteMode::Ordered, "ordered")
-            };
-            engine.discrete_mode = Some(d_mode);
+            if discrete_label == "binary" && cm.k_states > 2 {
+                eprintln!(
+                    "Error: --binary expects at most 2 states (0/1), but '{}' has K={} states (use --discrete or --ordered).",
+                    fasta, cm.k_states
+                );
+                process::exit(1);
+            }
             let r = infer_discrete_mdl(&engine, &cm, d_mode, starting_newick).unwrap_or_else(|e| {
                 eprintln!("Error running discrete BUSHWHACKER on '{fasta}': {e}");
                 process::exit(1);
             });
-            (cm.names, None, lbl, r)
+            // Archive the canonical symbol rendering of the matrix (same
+            // representation the WASM compressor stores) so --compress works
+            // on character-matrix input too.
+            let sym_seqs = discrete_matrix_to_symbol_seqs(&cm);
+            (
+                cm.names,
+                Some(sym_seqs),
+                discrete_label,
+                cm.k_states,
+                cm.feature_names,
+                r,
+            )
         } else {
-            let (nms, sqs) = parse_alignment_str(&input_text).unwrap_or_else(|e| {
-                eprintln!("Error reading alignment '{fasta}': {e}");
+            // Mirror the WASM `auto` dispatch in `infer_any_alignment_json`: CSV/TSV
+            // character matrices and 0/1 or 0..K-1 alignment-format inputs route to
+            // the discrete engine; protein and nucleotide stay on the primary engine.
+            let input_text = fs::read_to_string(&fasta).unwrap_or_else(|e| {
+                if fasta.ends_with(".bwz") {
+                    eprintln!(
+                        "Error reading alignment '{fasta}': {e}\n\
+                         Hint: a .bwz archive is restored with -d/--decompress <out.fa>."
+                    );
+                } else {
+                    eprintln!("Error reading alignment '{fasta}': {e}");
+                }
                 process::exit(1);
             });
-            let alphabet_kind = detect_sequence_alphabet_kind(&sqs);
-            let is_prot = force_protein || translate_coding || alphabet_kind == "protein";
-            if !is_prot && matches!(alphabet_kind, "binary" | "ordered") {
-                let cm = encode_discrete_sequences(&nms, &sqs).unwrap_or_else(|e| {
-                    eprintln!("Error encoding discrete characters in '{fasta}': {e}");
+            if looks_like_csv_or_tsv_matrix(&input_text) {
+                reject_discrete_ignored_flags(
+                    force_protein,
+                    translate_coding,
+                    no_coding,
+                    no_mult_pen,
+                    empirical_alpha,
+                );
+                let cm = parse_discrete_str(&input_text).unwrap_or_else(|e| {
+                    eprintln!("Error reading discrete character matrix '{fasta}': {e}");
                     process::exit(1);
                 });
-                let d_mode = if alphabet_kind == "ordered" {
-                    DiscreteMode::Ordered
+                let (d_mode, lbl) = if cm.k_states <= 2 {
+                    (DiscreteMode::Unordered, "binary")
                 } else {
-                    DiscreteMode::Unordered
+                    (DiscreteMode::Ordered, "ordered")
                 };
                 engine.discrete_mode = Some(d_mode);
-                let r = infer_discrete_mdl(&engine, &cm, d_mode, starting_newick).unwrap_or_else(|e| {
-                    eprintln!("Error running discrete BUSHWHACKER on '{fasta}': {e}");
-                    process::exit(1);
-                });
-                (cm.names, None, alphabet_kind, r)
-            } else {
-                let r = if let Some((in_nwk, unrooted)) = starting_newick {
-                    engine
-                        .infer_with_starting_newick(&nms, &sqs, in_nwk, unrooted)
-                        .unwrap_or_else(|e| {
-                            eprintln!(
-                                "Error contracting tree '{}' on '{fasta}': {e}",
-                                contract_tree.as_deref().unwrap_or_default()
-                            );
-                            process::exit(1);
-                        })
-                } else {
-                    engine.infer(&nms, &sqs).unwrap_or_else(|e| {
-                        eprintln!("Error running BUSHWHACKER on '{fasta}': {e}");
+                let r = infer_discrete_mdl(&engine, &cm, d_mode, starting_newick)
+                    .unwrap_or_else(|e| {
+                        eprintln!("Error running discrete BUSHWHACKER on '{fasta}': {e}");
                         process::exit(1);
-                    })
-                };
+                    });
+                let sym_seqs = discrete_matrix_to_symbol_seqs(&cm);
                 (
-                    nms,
-                    Some(sqs),
-                    if is_prot { "protein" } else { "nucleotide" },
+                    cm.names,
+                    Some(sym_seqs),
+                    lbl,
+                    cm.k_states,
+                    cm.feature_names,
                     r,
                 )
+            } else {
+                let (nms, sqs) = parse_alignment_str(&input_text).unwrap_or_else(|e| {
+                    eprintln!("Error reading alignment '{fasta}': {e}");
+                    process::exit(1);
+                });
+                let alphabet_kind = detect_sequence_alphabet_kind(&sqs);
+                let is_prot =
+                    force_protein || translate_coding || alphabet_kind == "protein";
+                if !is_prot && matches!(alphabet_kind, "binary" | "ordered") {
+                    reject_discrete_ignored_flags(
+                        force_protein,
+                        translate_coding,
+                        no_coding,
+                        no_mult_pen,
+                        empirical_alpha,
+                    );
+                    let cm = encode_discrete_sequences(&nms, &sqs).unwrap_or_else(|e| {
+                        eprintln!("Error encoding discrete characters in '{fasta}': {e}");
+                        process::exit(1);
+                    });
+                    let d_mode = if alphabet_kind == "ordered" {
+                        DiscreteMode::Ordered
+                    } else {
+                        DiscreteMode::Unordered
+                    };
+                    engine.discrete_mode = Some(d_mode);
+                    let r = infer_discrete_mdl(&engine, &cm, d_mode, starting_newick)
+                        .unwrap_or_else(|e| {
+                            eprintln!("Error running discrete BUSHWHACKER on '{fasta}': {e}");
+                            process::exit(1);
+                        });
+                    // The raw symbol strings are archived verbatim so the .bwz
+                    // payload round-trips the original input, not a re-encode.
+                    (
+                        cm.names,
+                        Some(sqs),
+                        alphabet_kind,
+                        cm.k_states,
+                        cm.feature_names,
+                        r,
+                    )
+                } else {
+                    let r = if let Some((in_nwk, unrooted)) = starting_newick {
+                        engine
+                            .infer_with_starting_newick(&nms, &sqs, in_nwk, unrooted)
+                            .unwrap_or_else(|e| {
+                                eprintln!(
+                                    "Error contracting tree '{}' on '{fasta}': {e}",
+                                    contract_tree.as_deref().unwrap_or_default()
+                                );
+                                process::exit(1);
+                            })
+                    } else {
+                        engine.infer(&nms, &sqs).unwrap_or_else(|e| {
+                            eprintln!("Error running BUSHWHACKER on '{fasta}': {e}");
+                            process::exit(1);
+                        })
+                    };
+                    // Report "translate" so the JSON `alphabet_mode` matches the
+                    // WASM vocabulary for the same operation.
+                    let label = if translate_coding {
+                        "translate"
+                    } else if is_prot {
+                        "protein"
+                    } else {
+                        "nucleotide"
+                    };
+                    let k = if is_prot { 20 } else { 4 };
+                    (nms, Some(sqs), label, k, Vec::new(), r)
+                }
             }
-        }
-    };
+        };
     let one_to_one_sites = alphabet_label != "nucleotide";
 
     println!("{}", "=".repeat(78));
@@ -673,7 +791,7 @@ fn main() {
             100.0 * s.posterior_prob,
             s.shared_mutations,
             match alphabet_label {
-                "protein" => "residues",
+                "protein" | "translate" => "residues",
                 "nucleotide" => "codons",
                 _ => "features_1based",
             },
@@ -702,7 +820,7 @@ fn main() {
     }
 
     if let Some(json_path) = out_json {
-        let json_str = serialize_json(&res, &fasta, alphabet_label);
+        let json_str = serialize_json(&res, &fasta, alphabet_label, k_states, &feature_names);
         fs::write(&json_path, json_str).unwrap_or_else(|e| {
             eprintln!("Error writing JSON to '{json_path}': {e}");
             process::exit(1);
@@ -712,7 +830,7 @@ fn main() {
 
     if let Some(bwz_path) = out_compress {
         let Some(seqs) = seqs_opt else {
-            eprintln!("Error: .bwz compression currently requires sequence FASTA/PHYLIP/NEXUS input.");
+            eprintln!("Error: .bwz compression requires alignment or character-matrix input.");
             process::exit(1);
         };
         let (bwz_bytes, stats) =

@@ -371,7 +371,16 @@ pub fn parse_discrete_str(text: &str) -> Result<DiscreteCharacterMatrix, String>
                 feature_names.push(toks[0].trim().trim_matches('"').to_string());
                 for c_idx in 0..n {
                     let st = match parse_cell_token(toks[c_idx + 1]) {
-                        Ok(Some(v)) => v.min(31) as i8,
+                        Ok(Some(v)) if v < MAX_DISCRETE_STATES as i32 => v as i8,
+                        Ok(Some(v)) => {
+                            return Err(format!(
+                                "Discrete state {v} at row {}, col {} exceeds the {}-state limit (valid: 0..{})",
+                                s_idx + 2,
+                                c_idx + 2,
+                                MAX_DISCRETE_STATES,
+                                MAX_DISCRETE_STATES - 1
+                            ))
+                        }
                         Ok(None) => -1_i8,
                         Err(()) => {
                             return Err(format!(
@@ -461,7 +470,16 @@ pub fn parse_discrete_str(text: &str) -> Result<DiscreteCharacterMatrix, String>
             feature_names.push(format!("{chr_s}_{start_s}_{end_s}"));
             for c_idx in 0..n {
                 let st = match parse_cell_token(toks[c_idx + 3]) {
-                    Ok(Some(v)) => v.min(31) as i8,
+                    Ok(Some(v)) if v < MAX_DISCRETE_STATES as i32 => v as i8,
+                    Ok(Some(v)) => {
+                        return Err(format!(
+                            "Discrete state {v} at row {}, col {} exceeds the {}-state limit (valid: 0..{})",
+                            s_idx + 2,
+                            c_idx + 4,
+                            MAX_DISCRETE_STATES,
+                            MAX_DISCRETE_STATES - 1
+                        ))
+                    }
                     Ok(None) => -1_i8,
                     Err(()) => {
                         return Err(format!(
@@ -519,7 +537,16 @@ pub fn parse_discrete_str(text: &str) -> Result<DiscreteCharacterMatrix, String>
         let off = i * l;
         for s in 0..l {
             let st = match parse_cell_token(toks[s + 1]) {
-                Ok(Some(v)) => v.min(31) as i8,
+                Ok(Some(v)) if v < MAX_DISCRETE_STATES as i32 => v as i8,
+                Ok(Some(v)) => {
+                    return Err(format!(
+                        "Discrete state {v} at row {}, column {} exceeds the {}-state limit (valid: 0..{})",
+                        i + start_row + 1,
+                        s + 2,
+                        MAX_DISCRETE_STATES,
+                        MAX_DISCRETE_STATES - 1
+                    ))
+                }
                 Ok(None) => -1_i8,
                 Err(()) => {
                     return Err(format!(

@@ -82,7 +82,8 @@ Options:
   -o, --out-newick <PATH>      Output Newick file path (with MDL branch supports & lengths)
   -b, --out-binary <PATH>      Output strictly binary Newick file path (for iqtree3 -t;
                                 annotated MDL tree still prints to stdout unless -o/-c)
-  -t, --contract-tree <PATH>   Contract unsupported splits & peel shunts on an input Newick tree
+  -t, --contract-tree <PATH>   Contract unsupported splits & peel shunts on an input Newick
+                                tree (positional alignment argument still required)
   -j, --out-json <PATH>        Output JSON report path (full MDL ledger, splits, & shunts)
   -c, --compress <PATH>        Write lossless .bwz phylogenetic archive to <PATH>
   -d, --decompress <PATH>      Decompress input .bwz archive into FASTA at <PATH>

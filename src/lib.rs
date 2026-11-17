@@ -8475,6 +8475,11 @@ struct ArithDecoder<'a> {
     low: u64,
     high: u64,
     val: u64,
+    /// Bits requested past the end of `data`. A valid stream only ever
+    /// overruns by lookahead (< ~32 bits for final renormalizations); a
+    /// truncated stream keeps requesting bits forever, which lets callers
+    /// distinguish corruption from legitimate decode.
+    eof_bits: usize,
 }
 
 impl<'a> ArithDecoder<'a> {
@@ -8485,6 +8490,7 @@ impl<'a> ArithDecoder<'a> {
             low: 0,
             high: 0xFFFF_FFFF,
             val: 0,
+            eof_bits: 0,
         };
         for _ in 0..32 {
             dec.val = (dec.val << 1) | (dec.get_bit() as u64);
@@ -8496,6 +8502,7 @@ impl<'a> ArithDecoder<'a> {
     fn get_bit(&mut self) -> u8 {
         let byte_idx = self.bit_pos >> 3;
         if byte_idx >= self.data.len() {
+            self.eof_bits += 1;
             return 0;
         }
         let b = (self.data[byte_idx] >> (7 - (self.bit_pos & 7))) & 1;
@@ -8632,7 +8639,10 @@ fn arith_compress_bytes_order0(input: &[u8]) -> Vec<u8> {
     enc.finish()
 }
 
-fn arith_decompress_bytes_order0(compressed: &[u8], out_len: usize) -> Vec<u8> {
+fn arith_decompress_bytes_order0(
+    compressed: &[u8],
+    out_len: usize,
+) -> Result<Vec<u8>, String> {
     let mut dec = ArithDecoder::new(compressed);
     let mut match_p1 = 16384_u32;
     let mut ctx_counts = vec![[1_u32; 256]; 256];
@@ -8645,13 +8655,22 @@ fn arith_decompress_bytes_order0(compressed: &[u8], out_len: usize) -> Vec<u8> {
             let len = dec.decode_int_elias(32768) + 4;
             let dist = dec.decode_int_elias(32768) + 1;
             let start = out.len().saturating_sub(dist);
+            let before = out.len();
             for i in 0..len {
-                if out.len() >= out_len {
+                // A corrupt stream can emit dist > out.len() or len larger than
+                // the remaining history; bail out instead of panicking so the
+                // truncated buffer fails cleanly downstream.
+                if out.len() >= out_len || start + i >= out.len() {
                     break;
                 }
                 let b = out[start + i];
                 out.push(b);
                 prev = b as usize;
+            }
+            if out.len() == before {
+                // A match that yields no bytes cannot make progress; stop
+                // decoding rather than spinning on the corrupt stream.
+                break;
             }
         } else {
             match_p1 = ((match_p1 * 31) >> 5).clamp(1, 65535);
@@ -8661,7 +8680,12 @@ fn arith_decompress_bytes_order0(compressed: &[u8], out_len: usize) -> Vec<u8> {
             prev = sym;
         }
     }
-    out
+    // Generous lookahead slack (256 bits >> the ~32-bit final renormalization
+    // window) so only genuinely truncated streams are rejected.
+    if dec.eof_bits > 256 {
+        return Err("Truncated .bwz metadata stream".to_string());
+    }
+    Ok(out)
 }
 
 /// Compress an alignment (`names`, `seqs`) and its induced `BushwhackerResult`
@@ -9292,6 +9316,16 @@ pub fn decompress_alignment_from_bwz(
     let l = read_u32(data, &mut pos)? as usize;
     let n_nodes = read_u32(data, &mut pos)? as usize;
     let k_alpha = read_u16(data, &mut pos)? as usize;
+    // Structural sanity checks: a tree on n leaves has at most 2n-1 nodes, and
+    // every field below must be non-empty for the decode loops to be safe.
+    if n == 0 || n_nodes == 0 || k_alpha == 0 {
+        return Err("Invalid .bwz header (empty taxa, node table, or alphabet)".to_string());
+    }
+    if n_nodes < n || n_nodes > 2 * n {
+        return Err(format!(
+            "Invalid .bwz header: node count {n_nodes} is inconsistent with {n} taxa"
+        ));
+    }
     if pos + k_alpha > data.len() {
         return Err("Unexpected EOF reading .bwz alphabet".to_string());
     }
@@ -9308,7 +9342,7 @@ pub fn decompress_alignment_from_bwz(
     if pos + meta_comp_len > data.len() {
         return Err("Unexpected EOF reading .bwz metadata block".to_string());
     }
-    let meta_raw = arith_decompress_bytes_order0(&data[pos..pos + meta_comp_len], meta_raw_len);
+    let meta_raw = arith_decompress_bytes_order0(&data[pos..pos + meta_comp_len], meta_raw_len)?;
     pos += meta_comp_len;
 
     let seq_comp_len = read_u32(data, &mut pos)? as usize;
@@ -9318,14 +9352,29 @@ pub fn decompress_alignment_from_bwz(
     let seq_payload = &data[pos..pos + seq_comp_len];
 
     // Parse decompressed metadata
+    // All reads below come from a byte buffer produced by arithmetic-decoding
+    // attacker-influenced bytes, so every length and index must be bounds
+    // checked: a corrupt archive must yield Err, never a panic.
     let mut mpos = 0usize;
     let names_len = read_u32(&meta_raw, &mut mpos)? as usize;
+    if mpos + names_len > meta_raw.len() {
+        return Err("Truncated taxon-name block in .bwz metadata".to_string());
+    }
     let names_str = String::from_utf8(meta_raw[mpos..mpos + names_len].to_vec())
         .map_err(|e| format!("UTF-8 error in .bwz taxon names: {e}"))?;
     mpos += names_len;
     let names: Vec<String> = names_str.split('\n').map(String::from).collect();
+    if names.len() != n {
+        return Err(format!(
+            "Invalid .bwz metadata: expected {n} taxon names, found {}",
+            names.len()
+        ));
+    }
 
     let nwk_len = read_u32(&meta_raw, &mut mpos)? as usize;
+    if mpos + nwk_len > meta_raw.len() {
+        return Err("Truncated Newick block in .bwz metadata".to_string());
+    }
     let newick = String::from_utf8(meta_raw[mpos..mpos + nwk_len].to_vec())
         .map_err(|e| format!("UTF-8 error in .bwz Newick string: {e}"))?;
     mpos += nwk_len;
@@ -9333,11 +9382,21 @@ pub fn decompress_alignment_from_bwz(
     let mut is_leaf_vec = Vec::with_capacity(n_nodes);
     let mut leaf_id_vec = Vec::with_capacity(n_nodes);
     let mut parent_pidx = Vec::with_capacity(n_nodes);
-    for _ in 0..n_nodes {
+    for pidx in 0..n_nodes {
+        if mpos >= meta_raw.len() {
+            return Err("Truncated node table in .bwz metadata".to_string());
+        }
         let is_l = meta_raw[mpos] != 0;
         mpos += 1;
         let lid = read_u32(&meta_raw, &mut mpos)? as usize;
         let pid = read_u32(&meta_raw, &mut mpos)? as usize;
+        // Nodes are stored in preorder, so every parent index must reference an
+        // already-emitted ancestor; anything else would read undecoded rows.
+        if pid >= n_nodes || (pidx > 0 && pid >= pidx) {
+            return Err(format!(
+                "Invalid .bwz metadata: parent index {pid} out of range at node {pidx}"
+            ));
+        }
         is_leaf_vec.push(is_l);
         leaf_id_vec.push(lid);
         parent_pidx.push(pid);
@@ -9352,6 +9411,16 @@ pub fn decompress_alignment_from_bwz(
         let mut sites = Vec::with_capacity(s_len);
         for _ in 0..s_len {
             sites.push(read_u32(&meta_raw, &mut mpos)? as usize);
+        }
+        // The donor row is read when the recipient is decoded, so in preorder
+        // storage the donor must strictly precede the recipient.
+        if rec_idx >= n_nodes || donor_idx >= rec_idx {
+            return Err(format!(
+                "Invalid .bwz metadata: shunt endpoint ({rec_idx}, {donor_idx}) out of range"
+            ));
+        }
+        if sites.iter().any(|&s| s >= l) {
+            return Err("Invalid .bwz metadata: shunt site index out of range".to_string());
         }
         shunt_map.insert(rec_idx, (donor_idx, sites));
     }
@@ -9631,6 +9700,12 @@ pub fn decompress_alignment_from_bwz(
         n_mask[pidx] = work_n;
     }
 
+    // Reject payloads whose decode ran far past the end of the bitstream
+    // (same 256-bit lookahead slack as the metadata stream).
+    if dec.eof_bits > 256 {
+        return Err("Truncated .bwz sequence payload".to_string());
+    }
+
     let mut restored_seqs: Vec<String> = vec![String::new(); n];
     for pidx in 0..n_nodes {
         if is_leaf_vec[pidx] {
@@ -9716,7 +9791,11 @@ pub fn detect_sequence_alphabet_kind(seqs: &[String]) -> &'static str {
     }
 }
 
-fn discrete_matrix_to_symbol_seqs(cm: &discrete::DiscreteCharacterMatrix) -> Vec<String> {
+/// Render a discrete character matrix back into symbol sequences (`0`-`9`,
+/// `A`-`V` for states 10-31, `?` for missing) so matrix inputs can be stored
+/// in a `.bwz` archive exactly as the WASM `compress_any_alignment_to_bwz`
+/// path does.
+pub fn discrete_matrix_to_symbol_seqs(cm: &discrete::DiscreteCharacterMatrix) -> Vec<String> {
     let mut seqs = Vec::with_capacity(cm.n_taxa);
     for i in 0..cm.n_taxa {
         let off = i * cm.n_sites;
