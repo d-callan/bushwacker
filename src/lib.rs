@@ -8001,17 +8001,41 @@ impl BushwhackerEngine {
                 }
                 id
             } else {
-                let start = *pos;
-                while *pos < bytes.len() && !matches!(bytes[*pos], b':' | b',' | b')' | b';') {
+                // Newick single-quoted labels may contain any character
+                // (including `():;,`) with an embedded `''` encoding a literal
+                // quote; our own serializers emit these via quote_newick_label.
+                let raw_name = if bytes[*pos] == b'\'' {
                     *pos += 1;
-                }
-                let raw_name = std::str::from_utf8(&bytes[start..*pos])
-                    .map_err(|e| e.to_string())?
-                    .trim()
-                    .trim_matches('\'')
-                    .trim_matches('"');
+                    let mut name_bytes = Vec::new();
+                    while *pos < bytes.len() {
+                        if bytes[*pos] == b'\'' {
+                            if *pos + 1 < bytes.len() && bytes[*pos + 1] == b'\'' {
+                                name_bytes.push(b'\'');
+                                *pos += 2;
+                            } else {
+                                *pos += 1;
+                                break;
+                            }
+                        } else {
+                            name_bytes.push(bytes[*pos]);
+                            *pos += 1;
+                        }
+                    }
+                    String::from_utf8(name_bytes).map_err(|e| e.to_string())?
+                } else {
+                    let start = *pos;
+                    while *pos < bytes.len() && !matches!(bytes[*pos], b':' | b',' | b')' | b';')
+                    {
+                        *pos += 1;
+                    }
+                    std::str::from_utf8(&bytes[start..*pos])
+                        .map_err(|e| e.to_string())?
+                        .trim()
+                        .trim_matches('"')
+                        .to_string()
+                };
                 *name_to_idx
-                    .get(raw_name)
+                    .get(raw_name.as_str())
                     .ok_or_else(|| format!("Unknown taxon '{}' in input Newick", raw_name))?
             };
 
@@ -8639,6 +8663,22 @@ fn arith_compress_bytes_order0(input: &[u8]) -> Vec<u8> {
     enc.finish()
 }
 
+/// Allocate a `rows` x `cols` grid whose dimensions come from archive
+/// metadata; failure yields `Err` rather than an allocation abort.
+fn checked_grid<T: Clone>(rows: usize, cols: usize, fill: T) -> Result<Vec<Vec<T>>, String> {
+    let mut v: Vec<Vec<T>> = Vec::new();
+    v.try_reserve(rows)
+        .map_err(|e| format!("Invalid .bwz dimensions ({rows}x{cols}): {e}"))?;
+    for _ in 0..rows {
+        let mut row: Vec<T> = Vec::new();
+        row.try_reserve(cols)
+            .map_err(|e| format!("Invalid .bwz dimensions ({rows}x{cols}): {e}"))?;
+        row.resize(cols, fill.clone());
+        v.push(row);
+    }
+    Ok(v)
+}
+
 fn arith_decompress_bytes_order0(
     compressed: &[u8],
     out_len: usize,
@@ -8647,7 +8687,11 @@ fn arith_decompress_bytes_order0(
     let mut match_p1 = 16384_u32;
     let mut ctx_counts = vec![[1_u32; 256]; 256];
     let mut prev = 0_usize;
-    let mut out = Vec::with_capacity(out_len);
+    // out_len comes from the archive header: reserve (not with_capacity) so an
+    // absurd declared length yields Err rather than an allocation abort.
+    let mut out: Vec<u8> = Vec::new();
+    out.try_reserve(out_len)
+        .map_err(|e| format!("Cannot allocate {out_len} bytes for .bwz payload: {e}"))?;
     while out.len() < out_len {
         let is_match = dec.decode_bit(match_p1) != 0;
         if is_match {
@@ -9326,6 +9370,14 @@ pub fn decompress_alignment_from_bwz(
             "Invalid .bwz header: node count {n_nodes} is inconsistent with {n} taxa"
         ));
     }
+    // The sequence alphabet is over raw bytes, so k_alpha can never exceed 256.
+    // Without this bound an attacker-crafted header could force a ~17 GiB
+    // transition-count allocation below.
+    if k_alpha > 256 {
+        return Err(format!(
+            "Invalid .bwz header: alphabet size {k_alpha} exceeds the byte-alphabet limit"
+        ));
+    }
     if pos + k_alpha > data.len() {
         return Err("Unexpected EOF reading .bwz alphabet".to_string());
     }
@@ -9342,6 +9394,16 @@ pub fn decompress_alignment_from_bwz(
     if pos + meta_comp_len > data.len() {
         return Err("Unexpected EOF reading .bwz metadata block".to_string());
     }
+    // Metadata holds taxon names, a Newick string, and the node table — far
+    // under 1 GiB for any real archive. An absolute cap is required because
+    // arithmetic-coded back-references can expand a handful of input bytes
+    // into gigabytes of output (decompression bomb).
+    const MAX_BWZ_META_BYTES: usize = 1 << 30;
+    if meta_raw_len > MAX_BWZ_META_BYTES {
+        return Err(format!(
+            "Invalid .bwz header: decompressed metadata size {meta_raw_len} exceeds limit"
+        ));
+    }
     let meta_raw = arith_decompress_bytes_order0(&data[pos..pos + meta_comp_len], meta_raw_len)?;
     pos += meta_comp_len;
 
@@ -9350,6 +9412,22 @@ pub fn decompress_alignment_from_bwz(
         return Err("Unexpected EOF reading .bwz sequence payload".to_string());
     }
     let seq_payload = &data[pos..pos + seq_comp_len];
+    // Every non-root node unconditionally emits one Elias-coded mutation count
+    // (>= 1 bit), so the payload cannot describe more than 8*len+1 nodes.
+    if n_nodes - 1 > seq_comp_len.saturating_mul(8) {
+        return Err(
+            "Invalid .bwz header: node count exceeds what the payload can encode".to_string(),
+        );
+    }
+    // The decode grids below cost ~1.25 bytes per (node, site) cell; cap the
+    // declared product so a hostile header cannot OOM the process at
+    // allocation time. ~4e9 cells ~= 5 GiB of decode buffers.
+    const MAX_BWZ_DECODE_CELLS: u64 = 4_000_000_000;
+    if (n_nodes as u64).saturating_mul(l as u64) > MAX_BWZ_DECODE_CELLS {
+        return Err(format!(
+            "Invalid .bwz header: {n_nodes} nodes x {l} sites exceeds the decode grid limit"
+        ));
+    }
 
     // Parse decompressed metadata
     // All reads below come from a byte buffer produced by arithmetic-decoding
@@ -9357,7 +9435,9 @@ pub fn decompress_alignment_from_bwz(
     // checked: a corrupt archive must yield Err, never a panic.
     let mut mpos = 0usize;
     let names_len = read_u32(&meta_raw, &mut mpos)? as usize;
-    if mpos + names_len > meta_raw.len() {
+    // Subtraction form (mpos <= len guaranteed by read_u32) avoids overflow on
+    // 32-bit targets where mpos + names_len could wrap.
+    if names_len > meta_raw.len() - mpos {
         return Err("Truncated taxon-name block in .bwz metadata".to_string());
     }
     let names_str = String::from_utf8(meta_raw[mpos..mpos + names_len].to_vec())
@@ -9390,8 +9470,9 @@ pub fn decompress_alignment_from_bwz(
         mpos += 1;
         let lid = read_u32(&meta_raw, &mut mpos)? as usize;
         let pid = read_u32(&meta_raw, &mut mpos)? as usize;
-        // Nodes are stored in preorder, so every parent index must reference an
-        // already-emitted ancestor; anything else would read undecoded rows.
+        // The encoder emits nodes in a traversal order where every parent
+        // precedes its children, so a parent index must reference an
+        // already-emitted node; anything else would read undecoded rows.
         if pid >= n_nodes || (pidx > 0 && pid >= pidx) {
             return Err(format!(
                 "Invalid .bwz metadata: parent index {pid} out of range at node {pidx}"
@@ -9408,12 +9489,19 @@ pub fn decompress_alignment_from_bwz(
         let rec_idx = read_u32(&meta_raw, &mut mpos)? as usize;
         let donor_idx = read_u32(&meta_raw, &mut mpos)? as usize;
         let s_len = read_u32(&meta_raw, &mut mpos)? as usize;
-        let mut sites = Vec::with_capacity(s_len);
+        // s_len is archive-controlled; try_reserve so an absurd count errors
+        // rather than aborting, and the bounded read_u32 loop then errors on
+        // the real metadata length anyway.
+        let mut sites: Vec<usize> = Vec::new();
+        sites
+            .try_reserve(s_len)
+            .map_err(|e| format!("Invalid .bwz shunt site count {s_len}: {e}"))?;
         for _ in 0..s_len {
             sites.push(read_u32(&meta_raw, &mut mpos)? as usize);
         }
-        // The donor row is read when the recipient is decoded, so in preorder
-        // storage the donor must strictly precede the recipient.
+        // The donor row is read when the recipient is decoded; the encoder
+        // normalizes donor < recipient in its traversal order, so the donor
+        // must strictly precede the recipient.
         if rec_idx >= n_nodes || donor_idx >= rec_idx {
             return Err(format!(
                 "Invalid .bwz metadata: shunt endpoint ({rec_idx}, {donor_idx}) out of range"
@@ -9427,9 +9515,11 @@ pub fn decompress_alignment_from_bwz(
 
     // Decode sequence payload in lockstep preorder
     let mut dec = ArithDecoder::new(seq_payload);
-    let mut node_seqs: Vec<Vec<u8>> = vec![vec![0_u8; l]; n_nodes];
-    let mut gap_mask: Vec<Vec<bool>> = vec![vec![false; l]; n_nodes];
-    let mut n_mask: Vec<Vec<bool>> = vec![vec![false; l]; n_nodes];
+    // `l` and `n_nodes` come from the archive header; checked_grid turns an
+    // absurd declared size into Err instead of an allocation abort.
+    let mut node_seqs = checked_grid(n_nodes, l, 0_u8)?;
+    let mut gap_mask = checked_grid(n_nodes, l, false)?;
+    let mut n_mask = checked_grid(n_nodes, l, false)?;
     let gap_sym_opt = alphabet.iter().position(|&x| x == b'-');
     let n_sym_opt = alphabet.iter().position(|&x| x == b'N');
     let is_canon = |b: u8| matches!(b, b'A' | b'C' | b'G' | b'T' | b'U' | b'a' | b'c' | b'g' | b't' | b'u');

@@ -202,11 +202,14 @@ fn serialize_json(
     let feature_names_json = if feature_names.is_empty() {
         "null".to_string()
     } else {
-        feature_names
-            .iter()
-            .map(|x| json_escape(x))
-            .collect::<Vec<_>>()
-            .join(", ")
+        format!(
+            "[{}]",
+            feature_names
+                .iter()
+                .map(|x| json_escape(x))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
     };
     let internal_branches: Vec<_> = res
         .branches
@@ -646,6 +649,12 @@ fn main() {
                 }
                 process::exit(1);
             });
+            if input_text.starts_with("BWZ1") {
+                eprintln!(
+                    "Error: '{fasta}' is a .bwz archive; restore it with -d/--decompress <out.fa>."
+                );
+                process::exit(1);
+            }
             if looks_like_csv_or_tsv_matrix(&input_text) {
                 reject_discrete_ignored_flags(
                     force_protein,

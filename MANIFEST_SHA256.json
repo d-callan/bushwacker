@@ -1,7 +1,7 @@
 {
   "package": "bushwhacker_science_zenodo_v1.0",
   "total_files": 527,
-  "total_bytes": 92029224,
+  "total_bytes": 92033956,
   "files": {
     ".github/workflows/publish-python.yml": {
       "bytes": 3219,
@@ -2096,12 +2096,12 @@
       "sha256": "c5c1c6f1a7c534bd53961b2fb4d14389d5739f793abdf8e52d14132df29d05e6"
     },
     "src/lib.rs": {
-      "bytes": 409948,
-      "sha256": "10fe66cb551cd20a07e913ddd2fd5de579d2db8055612b9b58c1eced4a70bd2a"
+      "bytes": 414371,
+      "sha256": "46e1aa01ccd81cabee3b6e5ca32d00ad987784a09db878020403ef5e7958e18c"
     },
     "src/main.rs": {
-      "bytes": 34817,
-      "sha256": "eda0c4764844adb1b08bd07f3b797ddb91941f04652235b9d06656a51eed781b"
+      "bytes": 35126,
+      "sha256": "f7c7ad3e6cc239d2529f00a8388b7ae08b7010c0db1992c6d287baf48029f31d"
     },
     "src/nt_gtr.rs": {
       "bytes": 68706,
