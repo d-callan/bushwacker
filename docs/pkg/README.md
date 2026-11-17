@@ -61,6 +61,13 @@ python -m bushwhacker --help  # or via the Python shim
 
 The wheel bundles the compiled Rust binary plus a thin `bushwhacker` Python package (`bushwhacker.binary_path()`, `bushwhacker.main()`); all inference runs in Rust.
 
+### Via `conda` / `mamba` (bioconda)
+
+```bash
+conda install -c conda-forge -c bioconda bushwhacker
+bushwhacker --help
+```
+
 ### From source (Rust)
 
 ```bash

@@ -1,11 +1,11 @@
 {
   "package": "bushwhacker_science_zenodo_v1.0",
   "total_files": 527,
-  "total_bytes": 92046289,
+  "total_bytes": 92046765,
   "files": {
     ".github/workflows/publish-python.yml": {
-      "bytes": 3219,
-      "sha256": "d98020682b277e5cc154ea9e7255c22df733196ef874d0daa99b1197a5c4c205"
+      "bytes": 3449,
+      "sha256": "459770a77aba1f0fbfea6259debd9aadfca4098549298f2c0205ecc611a34b48"
     },
     ".zenodo.json": {
       "bytes": 2886,
@@ -36,8 +36,8 @@
       "sha256": "2541240f6ae94575d0c5cc5cd3f64c43876145208094f27be595f8737e63d61f"
     },
     "README.md": {
-      "bytes": 18846,
-      "sha256": "bccb111ebcc869e153deb92d2e6390b61970c2550fb909bda05beadbe4449ef6"
+      "bytes": 18969,
+      "sha256": "235ca1b7bfacb62824531a21e32ff5248ed2b7f409916782201131a843ec4941"
     },
     "data/DATA_MANIFEST.json": {
       "bytes": 26471,
@@ -572,8 +572,8 @@
       "sha256": "fdf1b099c9c955e3c777c2a3fd92e69033f325b49a1ccc8044e524ee8aa49ba2"
     },
     "docs/pkg/README.md": {
-      "bytes": 19273,
-      "sha256": "b9d9da8da8ba7d2b8f2fa31f0a4ea5c6182c600da09ca2145352693d8cdfd3ef"
+      "bytes": 19396,
+      "sha256": "8ffe72fa99fc73565a6efdebc46e6f1b69d256b6ba709333921067e698bb465e"
     },
     "docs/pkg/bushwhacker.d.ts": {
       "bytes": 3299,
