@@ -271,8 +271,8 @@ def process_dataset(ds_id: int, base_dir: Path, run_ml: bool = True, seed: int |
     out_json = out_dir / f"ds_{ds_id}.json"
 
     bw_bin = str(base_dir / "target" / "release" / "bushwhacker")
-    iqtree_bin = "/opt/ohpc/pub/apps/iqtree/2.4.0/bin/iqtree2"
-    fasttree_bin = "/usr/local/bin/FastTree"
+    iqtree_bin = resolve_bin("IQTREE_BIN", "iqtree2", "iqtree")
+    fasttree_bin = resolve_bin("FASTTREE_BIN", "FastTreeMP", "FastTree", "fasttree")
     phyml_bin = str(base_dir / "phyml" / "src" / "phyml")
 
     with tempfile.TemporaryDirectory(prefix=f"ag_ds{ds_id}_") as tmp:

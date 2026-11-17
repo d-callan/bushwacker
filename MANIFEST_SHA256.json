@@ -1,7 +1,7 @@
 {
   "package": "bushwhacker_science_zenodo_v1.0",
   "total_files": 527,
-  "total_bytes": 92014098,
+  "total_bytes": 92046289,
   "files": {
     ".github/workflows/publish-python.yml": {
       "bytes": 3219,
@@ -9,15 +9,15 @@
     },
     ".zenodo.json": {
       "bytes": 2886,
-      "sha256": "485019e5dcfaa9ca4e1fc23d2d27b9488dac80da4d4ca40f0dd7a2c2b7e67776"
+      "sha256": "9f14d400104fb68d21fc61d47a3db8ed4df711134b24a1a6eb398411d5992f38"
     },
     "AGENTS.md": {
-      "bytes": 4767,
-      "sha256": "072a499c924105f3e883a4f427b29786b4d02a9692e1674a5baab56b330c6cfb"
+      "bytes": 4780,
+      "sha256": "cbf95227ac56408e80d46b69f7f88cad75390648421998118d02156951de9703"
     },
     "CITATION.cff": {
       "bytes": 943,
-      "sha256": "c21234dd95f65ec42fd6a82048472cc482aa04322d35b3ebc44980334a1ff035"
+      "sha256": "f42d8ab086d248d385f686664f05a1b64995708f7923d635f79f7c0a73ffd299"
     },
     "Cargo.lock": {
       "bytes": 5748,
@@ -36,8 +36,8 @@
       "sha256": "2541240f6ae94575d0c5cc5cd3f64c43876145208094f27be595f8737e63d61f"
     },
     "README.md": {
-      "bytes": 18206,
-      "sha256": "90a29bf60a1945c8a092d58b7403bd14ed72c103424279acb66ebfb2a3ecefe0"
+      "bytes": 18846,
+      "sha256": "bccb111ebcc869e153deb92d2e6390b61970c2550fb909bda05beadbe4449ef6"
     },
     "data/DATA_MANIFEST.json": {
       "bytes": 26471,
@@ -572,8 +572,8 @@
       "sha256": "fdf1b099c9c955e3c777c2a3fd92e69033f325b49a1ccc8044e524ee8aa49ba2"
     },
     "docs/pkg/README.md": {
-      "bytes": 18633,
-      "sha256": "d25b6d6e3f7e11769d040b5c1a02c427b312b552dd7b5d776c8e08d592668f88"
+      "bytes": 19273,
+      "sha256": "b9d9da8da8ba7d2b8f2fa31f0a4ea5c6182c600da09ca2145352693d8cdfd3ef"
     },
     "docs/pkg/bushwhacker.d.ts": {
       "bytes": 3299,
@@ -1940,8 +1940,8 @@
       "sha256": "02070689480aa489002cb58eaab237ea1964c75644b168349b236d941d34c493"
     },
     "scripts/benchmarks/run_abadi_gerth_worker.py": {
-      "bytes": 21363,
-      "sha256": "8e6314f55715de17e11d11f1fac1f81f40ff1ed8ac9542bf095e6fa06ed131f8"
+      "bytes": 21404,
+      "sha256": "7f60a014ec1ac46ec17e5a8090ef05fae9b9e96e849904a7648f9bd0acad5568"
     },
     "scripts/benchmarks/run_aml_showcase_specimen.py": {
       "bytes": 7382,
@@ -1964,12 +1964,12 @@
       "sha256": "0e1434de59f661d347d724185272b4339831a89b5623a1eb0dc3f4f7f3202a7d"
     },
     "scripts/benchmarks/run_gtdb_astral_and_hgt.py": {
-      "bytes": 23207,
-      "sha256": "65a9a4ae0e328f66cdea025bd7799afb8a6217f306b4ac4c76b93badf59c3198"
+      "bytes": 23198,
+      "sha256": "2ed82c96361822e1b02c1e43a8511e4bd38cf30b085b1efe4237f453ff4cb249"
     },
     "scripts/benchmarks/run_gtdb_benchmark.py": {
-      "bytes": 23434,
-      "sha256": "d1d4af2650f417a3efd8b5b1cb9fbdfbce644ac8b77783e31b8e0df6267e6a22"
+      "bytes": 23425,
+      "sha256": "967c4a38b57485d5ad882d452c81b4985519c8c9077a1f359ee32c89af4c33ed"
     },
     "scripts/benchmarks/run_gtdb_sota_protein_bench.py": {
       "bytes": 20793,
@@ -1996,16 +1996,16 @@
       "sha256": "30fdb614cd97e73196399d46a197f66f873a7dd132e030ef5c88913ed1461705"
     },
     "scripts/benchmarks/run_plant_kingdom_atlas.py": {
-      "bytes": 28375,
-      "sha256": "0ea7d1a04a6a94ad4df311c74a6036dc65f9a8bace98c85bab707c48677746c9"
+      "bytes": 28477,
+      "sha256": "3eb94b74064605543a0d4cfd414c90e02e511e27af9a095100cfcbc843aeab7c"
     },
     "scripts/benchmarks/run_rokas2018_benchmark.py": {
       "bytes": 23650,
       "sha256": "7c9f4e58101fba25389c395af6f0ea7604a802ac980021e50cd5c54c3d0dfd62"
     },
     "scripts/benchmarks/run_silverback_sim_worker.py": {
-      "bytes": 29607,
-      "sha256": "15ae689d7e4c7bd307485886374af5befaf4afc7624c162d15c18497dd043a66"
+      "bytes": 29597,
+      "sha256": "991c00723e7ae93eb4ef99b993cb6fae23ac19919bf26f65cd53534eefa8a80a"
     },
     "scripts/benchmarks/run_toga2_bushwhacker_all.py": {
       "bytes": 16465,
@@ -2092,24 +2092,24 @@
       "sha256": "3aed7e298fcaf805e091db650cb154c010c1794c48567ff6b63a0a0ee11cd121"
     },
     "src/discrete.rs": {
-      "bytes": 196401,
-      "sha256": "6608d9dd698b31b84a06726f959ad625c880c6a1b9cb4d7ff44f5a78fdfbaa20"
+      "bytes": 197965,
+      "sha256": "c5c1c6f1a7c534bd53961b2fb4d14389d5739f793abdf8e52d14132df29d05e6"
     },
     "src/lib.rs": {
-      "bytes": 405206,
-      "sha256": "bf9f427b59eb5b548f9cbcc47df43c68e94d71aad3c64f1fedded0c1a01d8736"
+      "bytes": 426554,
+      "sha256": "0b482bf35a7e047fb2eab5d0a5e8261e8924f460bbccce82d1c171b9ca2143b6"
     },
     "src/main.rs": {
-      "bytes": 27647,
-      "sha256": "96210c9f694c0718852690c2314e4aacd37f6a8934bbe55e245f6b31a8de6901"
+      "bytes": 35230,
+      "sha256": "d8e8c75525ebdde98d4aead58cad51b210c18606726f61ceca9c9acab2b8626e"
     },
     "src/nt_gtr.rs": {
       "bytes": 68706,
       "sha256": "0673cf942a2b29d62c56f59ef6681ac21778670663b5ef86e6d2664c0bfc0fd2"
     },
     "src/protein.rs": {
-      "bytes": 237018,
-      "sha256": "2a8cdc1e59835a1276e26f10c2576e687d6905160e283a9e7f6a5c0fff2ee9bf"
+      "bytes": 237306,
+      "sha256": "42d343499ad1c38757f552fc5a4384d307ae91d38e4aeafe8594b5717c1e886f"
     }
   }
 }

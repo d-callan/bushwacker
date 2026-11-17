@@ -12,8 +12,8 @@ use std::time::Instant;
 use rayon::prelude::*;
 
 use crate::{
-    branch_mutation_code_nats, log_binom, split_topology_cost_nats, translate_bases, BranchRecord,
-    BushwhackerEngine, BushwhackerResult, ShuntEdge,
+    branch_mutation_code_nats, log_binom, quote_newick_label, split_topology_cost_nats,
+    translate_bases, BranchRecord, BushwhackerEngine, BushwhackerResult, ShuntEdge,
 };
 
 pub const AA_ALPHABET_SIZE: usize = 20;
@@ -5429,11 +5429,17 @@ fn serialize_protein_newick(
     n: usize,
 ) -> String {
     if n == 1 {
-        return format!("{}:0.0;", names[0]);
+        return format!("{}:0.0;", quote_newick_label(&names[0]));
     }
     if n == 2 {
         let b_len = branches.first().map(|b| b.branch_length).unwrap_or(0.0);
-        return format!("({}:{:.6},{}:{:.6});", names[0], b_len / 2.0, names[1], b_len / 2.0);
+        return format!(
+            "({}:{:.6},{}:{:.6});",
+            quote_newick_label(&names[0]),
+            b_len / 2.0,
+            quote_newick_label(&names[1]),
+            b_len / 2.0
+        );
     }
     let mut edge_map: HashMap<(usize, usize), &BranchRecord> = HashMap::new();
     for b in branches {
@@ -5458,7 +5464,7 @@ fn serialize_protein_newick(
     ) -> String {
         visited.insert(u);
         let label = if u < n {
-            names[u].clone()
+            quote_newick_label(&names[u])
         } else {
             let children: Vec<usize> = adj[&u]
                 .iter()
@@ -5502,10 +5508,14 @@ fn serialize_protein_binary_newick(
 ) -> String {
     let min_bl = (0.5 / l_eff.max(1.0)).max(1e-5);
     if n == 1 {
-        return format!("{}:0.000010;", names[0]);
+        return format!("{}:0.000010;", quote_newick_label(&names[0]));
     }
     if n == 2 {
-        return format!("({}:{min_bl:.6},{}:{min_bl:.6});", names[0], names[1]);
+        return format!(
+            "({}:{min_bl:.6},{}:{min_bl:.6});",
+            quote_newick_label(&names[0]),
+            quote_newick_label(&names[1])
+        );
     }
     let mut edge_bl: HashMap<(usize, usize), f64> = HashMap::new();
     if let Some(stats) = lg08_edge_stats {
@@ -5564,7 +5574,7 @@ fn serialize_protein_binary_newick(
     ) -> String {
         visited.insert(u);
         let label = if u < n {
-            names[u].clone()
+            quote_newick_label(&names[u])
         } else {
             let children: Vec<usize> = adj[&u]
                 .iter()
